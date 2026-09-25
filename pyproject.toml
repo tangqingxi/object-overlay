@@ -1,0 +1,18 @@
+[project]
+name = "object-overlay"
+version = "0.1.0"
+description = "从视频生成目标对象的多时刻叠加图"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "imageio-ffmpeg>=0.6.0",
+    "numpy>=2.5.3",
+    "opencv-python>=5.0.0.93",
+]
+
+[project.scripts]
+object-overlay = "object_overlay.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"

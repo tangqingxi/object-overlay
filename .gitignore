@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 示例输入视频和运行产物通常较大，不纳入版本控制。
+examples/drone/input/*
+!examples/drone/input/.gitkeep
+examples/drone/output/*
+!examples/drone/output/drone_1_selected/
+examples/drone/output/drone_1_selected/*
+!examples/drone/output/drone_1_selected/overlay_selected.png
