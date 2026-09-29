@@ -34,9 +34,7 @@ class ComposeOverlayTest(unittest.TestCase):
                 frame_paths,
                 [empty_mask, object_mask],
                 base_index=0,
-                output_dir=root,
-                mode="manual",
-            )
+                output_dir=root,            )
             output = read_image(result.png_path, cv2.IMREAD_UNCHANGED)
 
             self.assertIsNotNone(output)

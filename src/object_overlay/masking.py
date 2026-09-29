@@ -244,39 +244,6 @@ def _edit_manual_frame(
     return full_mask
 
 
-def generate_manual_masks(
-    images: list[np.ndarray],
-    mask_dir: Path,
-    force: bool,
-    base_index: int,
-) -> list[np.ndarray]:
-    """逐帧生成由用户确认的目标 Mask。"""
-    mask_dir.mkdir(parents=True, exist_ok=True)
-    height, width = images[0].shape[:2]
-    masks: list[np.ndarray] = []
-
-    for frame_index in range(len(images)):
-        frame_number = frame_index + 1
-
-        if frame_index == base_index:
-            masks.append(np.zeros((height, width), dtype=np.uint8))
-            print(f"frame_{frame_number:04d}：固定背景帧")
-            continue
-
-        masks.append(
-            _edit_manual_frame(
-                frame_index,
-                images,
-                mask_dir,
-                force,
-                width,
-                height,
-            )
-        )
-
-    return masks
-
-
 def _build_motion_background(
     images: list[np.ndarray],
 ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
@@ -420,7 +387,7 @@ def _refine_motion_mask(
         ][:5]
 
     if not references:
-        raise RuntimeError("运动目标模式至少需要两张抽帧。")
+        raise RuntimeError("自动提取运动目标至少需要两张抽帧。")
 
     local_background = np.median(
         np.stack(references, axis=0),
@@ -514,6 +481,47 @@ def _refine_motion_mask(
     return full_mask
 
 
+def detect_background_object(
+    images: list[np.ndarray],
+    base_index: int,
+) -> np.ndarray:
+    """检测固定在背景帧里的目标。
+
+    背景帧通常直接当作画布，但它里面往往也有目标。这里单独检测一次，
+    不参与 generate_motion_masks 的时序先验，因此不会改变其它帧的 Mask。
+    背景帧没有可检测目标时返回空 Mask。
+    """
+    height, width = images[0].shape[:2]
+    empty = np.zeros((height, width), dtype=np.uint8)
+
+    if len(images) < 2:
+        return empty
+
+    small_images, background, sample_ids = _build_motion_background(images)
+    background_lab = cv2.cvtColor(background, cv2.COLOR_BGR2LAB).astype(np.int16)
+    detected = _detect_motion_bbox(
+        small_images[base_index],
+        background_lab,
+        None,
+        width,
+        height,
+    )
+
+    if detected is None:
+        return empty
+
+    x, y, object_width, object_height, _center = detected
+
+    return _refine_motion_mask(
+        base_index,
+        (x, y, object_width, object_height),
+        sample_ids,
+        images,
+        width,
+        height,
+    )
+
+
 def generate_motion_masks(
     images: list[np.ndarray],
     mask_dir: Path,
@@ -523,7 +531,7 @@ def generate_motion_masks(
 ) -> list[np.ndarray]:
     """通过背景差分和位置连续性生成运动目标 Mask。"""
     if len(images) < 2:
-        raise RuntimeError("运动目标模式至少需要两张抽帧。")
+        raise RuntimeError("自动提取运动目标至少需要两张抽帧。")
 
     mask_dir.mkdir(parents=True, exist_ok=True)
     height, width = images[0].shape[:2]

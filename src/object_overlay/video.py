@@ -36,6 +36,17 @@ def write_image(
     path.write_bytes(encoded.tobytes())
 
 
+def cast_pixels(values: np.ndarray, dtype: np.dtype) -> np.ndarray:
+    """把浮点混合结果裁剪并还原为原始像素类型。"""
+    target = np.dtype(dtype)
+
+    if np.issubdtype(target, np.integer):
+        info = np.iinfo(target)
+        values = np.clip(values, info.min, info.max)
+
+    return values.astype(target)
+
+
 def _read_metadata(metadata_file: Path) -> dict:
     if not metadata_file.exists():
         return {}
@@ -60,6 +71,20 @@ def _write_metadata(
             ensure_ascii=False,
             indent=2,
         ),
+        encoding="utf-8",
+    )
+
+
+def update_metadata(metadata_file: Path, **fields: object) -> None:
+    """把本次运行的附加信息合并进抽帧记录。
+
+    调用方不应传入 video 或 interval——那是 prepare_frames 判断能否复用
+    已有抽帧的依据，改掉会让缓存校验失效。
+    """
+    metadata = _read_metadata(metadata_file)
+    metadata.update(fields)
+    metadata_file.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 

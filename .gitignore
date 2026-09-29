@@ -4,9 +4,9 @@ __pycache__/
 .pytest_cache/
 
 # 示例输入视频和运行产物通常较大，不纳入版本控制。
+# 两个目录都用 .gitkeep 占位：Git 不跟踪空目录，没有占位文件的话，
+# 别人克隆下来就既没有放视频的 input，也没有收结果的 output。
 examples/drone/input/*
 !examples/drone/input/.gitkeep
 examples/drone/output/*
-!examples/drone/output/drone_1_selected/
-examples/drone/output/drone_1_selected/*
-!examples/drone/output/drone_1_selected/overlay_selected.png
+!examples/drone/output/.gitkeep
