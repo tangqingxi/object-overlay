@@ -606,6 +606,10 @@ class Sam2Tracker:
                         self.images[self.base_index],
                         self.base_index + 1,
                         window_prefix="1 Select SAM2 Target",
+                        instruction=(
+                            "SAM 2.1: drag a box around the target, "
+                            "then press Enter"
+                        ),
                     )
 
                 mask = self._prompt_box(box)

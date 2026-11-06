@@ -124,7 +124,7 @@ SAM 版默认 `--tracker sam2`。`--tracker motion` 仍保留为后备，但 AI 
 ### 首次指定目标
 
 1. 程序先显示 `--base-frame` 指定的背景帧，例如默认 `frame_0001`。
-2. 在完整画面上用鼠标框住无人机，按 Enter。
+2. 框选窗口顶部会显示 `Drag a box around the target, then press Enter`；用鼠标框住无人机，按 Enter。
 3. SAM 2.1 生成初始 Mask，并显示绿色分割预览。
 4. 按 Enter 接受；按 `M` 用现有编辑器修正；按 `R` 重新框选；按 `Q/Esc` 取消。
 5. 接受后 SAM 2.1 从该帧向前传播；如果背景帧不是第一帧，也会向视频开头反向传播。

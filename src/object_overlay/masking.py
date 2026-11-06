@@ -80,6 +80,7 @@ def _select_target_roi(
     image: np.ndarray,
     frame_number: int,
     window_prefix: str = "1 Select Target",
+    instruction: str = "Drag a box around the target, then press Enter",
 ) -> tuple[int, int, int, int]:
     """在完整画面中框选目标，返回原分辨率坐标 (x, y, w, h)。"""
     height, width = image.shape[:2]
@@ -96,6 +97,38 @@ def _select_target_roi(
         fx=display_scale,
         fy=display_scale,
         interpolation=cv2.INTER_AREA,
+    )
+
+    # 说明直接画在框选窗口里，不能只打印到控制台。
+    banner_height = 56
+    banner = preview.copy()
+    cv2.rectangle(
+        banner,
+        (0, 0),
+        (preview.shape[1], banner_height),
+        (0, 0, 0),
+        -1,
+    )
+    preview = cv2.addWeighted(banner, 0.55, preview, 0.45, 0)
+    cv2.putText(
+        preview,
+        instruction,
+        (12, 23),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        preview,
+        "Enter/Space = confirm    C = cancel",
+        (12, 46),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
     )
     select_window = f"{window_prefix} - frame_{frame_number:04d}"
 
