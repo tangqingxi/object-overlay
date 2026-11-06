@@ -11,7 +11,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .menu import choose, prompt_text
+from .menu import (
+    _BOLD,
+    _CYAN,
+    _DIM,
+    _enable_ansi,
+    _paint,
+    choose,
+    prompt_text,
+)
 from .pipeline import RunConfig, default_output_dir
 from .trajectory import format_hex_color, parse_hex_color
 
@@ -26,10 +34,13 @@ class Question:
 
 
 _MODE_OPTIONS = (
-    ("overlay", "只出无损叠加图"),
-    ("ghost", "只出残影版"),
-    ("both", "两个都出"),
+    ("overlay", "无损版", "只出无损叠加图"),
+    ("ghost", "残影版", "只出残影版"),
+    ("both", "两者都出", "两个都出"),
 )
+_MODE_LABELS = {
+    value: label for value, label, _note in _MODE_OPTIONS
+}
 _INTERVAL_PRESETS = (0.5, 1.0, 2.0)
 _COLOR_PRESETS = (
     ("#FFA500", "琥珀"),
@@ -39,14 +50,24 @@ _COLOR_PRESETS = (
 _CUSTOM = "自定义"
 
 _KEYS_HINT = (
-    "↑/↓ 选择   Enter 或 → 确认   ← 或 Esc 返回上一步（在第一题时取消）"
+    "↑/↓ 选择   回车或→ 确认   ← 或 Esc 返回上一步（在第一题时取消）"
 )
 
 _GHOST_MODES = ("ghost", "both")
 
 
+def _mode_options(
+    _config: RunConfig,
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (label, note) for _value, label, note in _MODE_OPTIONS
+    )
+
+
 def _mode_index(config: RunConfig) -> int:
-    return [value for value, _ in _MODE_OPTIONS].index(config.mode)
+    return [value for value, _label, _note in _MODE_OPTIONS].index(
+        config.mode
+    )
 
 
 def _apply_mode(config: RunConfig, index: int) -> RunConfig:
@@ -204,7 +225,7 @@ def _build_questions() -> tuple[Question, ...]:
     return (
         Question(
             title="要生成哪种叠加图",
-            options=lambda _config: _MODE_OPTIONS,
+            options=_mode_options,
             current=_mode_index,
             apply=_apply_mode,
         ),
@@ -254,8 +275,9 @@ def _summarize(config: RunConfig) -> None:
         trajectory = "不绘制"
 
     print()
-    print("将按以下设置生成：")
-    print(f"  输出内容    {config.mode}")
+    print(_paint("  将按以下设置生成", _BOLD, _CYAN))
+    print(_paint("  " + "-" * 40, _DIM))
+    print(f"  输出内容    {_MODE_LABELS.get(config.mode, config.mode)}")
     print(f"  输出目录    {_resolved_output_dir(config)}")
 
     if _is_ghost(config):
@@ -274,8 +296,11 @@ def configure(config: RunConfig) -> RunConfig | None:
     current = config
     index = 0
 
+    _enable_ansi()
     print()
-    print(_KEYS_HINT)
+    print(_paint("  Object Overlay · Light", _BOLD, _CYAN))
+    print(_paint("  " + "-" * 40, _DIM))
+    print(_paint("  " + _KEYS_HINT, _DIM))
 
     while True:
         # 每次作答后重新筛题：第一题选 overlay 之后，轨迹线那两题会消失；
