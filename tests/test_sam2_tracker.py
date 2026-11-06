@@ -329,6 +329,62 @@ class Sam2TrackerTest(unittest.TestCase):
             np.testing.assert_array_equal(tracker.masks[1], earlier)
             np.testing.assert_array_equal(tracker.masks[2], earlier)
 
+    def test_跟踪帧数只需覆盖最后一个输出帧(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            video_path = root / "clip.mp4"
+            video_path.write_bytes(b"placeholder")
+            frame_files: list[Path] = []
+            images: list[np.ndarray] = []
+
+            for index in range(3):
+                image = np.zeros((8, 8, 3), dtype=np.uint8)
+                path = root / f"frame_{index + 1:04d}.png"
+                write_image(path, image)
+                frame_files.append(path)
+                images.append(image)
+
+            tracker = Sam2Tracker(
+                video_path,
+                frame_files,
+                images,
+                root,
+                0,
+                0.5,
+                target_track_fps=6.0,
+            )
+
+            def fake_extract(self: Sam2Tracker) -> None:
+                self.track_dir.mkdir(parents=True, exist_ok=True)
+
+                for index in range(8):
+                    write_image(
+                        self.track_dir / f"{index:05d}.jpg",
+                        np.zeros((8, 8, 3), dtype=np.uint8),
+                    )
+
+            with (
+                patch(
+                    "object_overlay.sam2_tracker.find_ffmpeg",
+                    return_value="ffmpeg",
+                ),
+                patch(
+                    "subprocess.run",
+                    side_effect=RuntimeError("ffmpeg failed"),
+                ),
+                patch.object(
+                    Sam2Tracker,
+                    "_extract_tracking_frames_with_opencv",
+                    fake_extract,
+                ),
+            ):
+                tracker._compute_tracking_plan()
+                tracker._ensure_tracking_frames()
+
+            self.assertEqual(tracker.stride, 3)
+            self.assertTrue(tracker._track_frames_ready)
+            self.assertTrue(tracker.track_meta_path.exists())
+
     def test_force保留人工锚点但重新传播(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             root = Path(temporary_dir)

@@ -343,7 +343,10 @@ class Sam2Tracker:
             return
 
         metadata = self._read_tracking_meta()
-        required = len(self.images) * self.stride
+        # 输出帧 i 映射到跟踪帧 i * stride；只需要覆盖最后一个输出帧，
+        # 不要求跟踪帧数恰好是输出帧数 × stride。FFmpeg/OpenCV 的时长
+        # 取整可能少几帧，但只要最后一个输出帧仍落在范围内即可。
+        required = (len(self.images) - 1) * self.stride + 1
         existing = sorted(self.track_dir.glob("*.jpg"))
 
         if (
