@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .text import draw_text
 from .video import read_image, write_image
 
 
@@ -13,7 +14,7 @@ MANUAL_ROI_PADDING = 50
 INITIAL_BRUSH_RADIUS = 10
 
 # 背景帧人工修正复用 masks_corrected 目录，但文件名与普通候选帧分开，
-# 避免改变 --base-frame 后把旧的背景 Mask 误当成候选帧修正。
+# 避免改变 --base-frame 后把旧的背景 掩膜 误当成候选帧修正。
 BACKGROUND_CACHE_MASK_NAME = "background_mask.png"
 BACKGROUND_CACHE_STATE_NAME = "background.json"
 BACKGROUND_SOURCE_AUTO = "auto"
@@ -32,9 +33,9 @@ MOTION_MAX_HEIGHT_RATIO = 0.40
 class SelectionResult:
     """逐帧复核的结果。
 
-    selected_masks 与抽帧等长，背景帧位置恒为空 Mask，不参与无损叠加；
-    background_mask 是用户最终确认的背景帧 Mask。None 只表示用户主动
-    跳过了背景目标，与"自动检测失败返回空 Mask"是两种不同状态。
+    selected_masks 与抽帧等长，背景帧位置恒为空 掩膜，不参与无损叠加；
+    background_mask 是用户最终确认的背景帧 掩膜。None 只表示用户主动
+    跳过了背景目标，与"自动检测失败返回空 掩膜"是两种不同状态。
     """
 
     selected_masks: list[np.ndarray]
@@ -45,8 +46,8 @@ class SelectionResult:
 class TrackingHooks:
     """逐帧复核与跟踪后端之间的最小接口。
 
-    correct/restore 接收候选帧下标和当前 Mask，返回与所有抽帧等长的更新后
-    Mask 列表。这样 SAM 2.1 可以在用户按 M 后重传播下游帧，而 GUI 本身
+    correct/restore 接收候选帧下标和当前 掩膜，返回与所有抽帧等长的更新后
+    掩膜 列表。这样 SAM 2.1 可以在用户按 M 后重传播下游帧，而 GUI 本身
     仍然只负责选择和展示。
     """
 
@@ -68,10 +69,10 @@ def _load_saved_mask(
     mask = read_image(mask_path, cv2.IMREAD_GRAYSCALE)
 
     if mask is None:
-        raise RuntimeError(f"读取 Mask 失败：{mask_path}")
+        raise RuntimeError(f"读取 掩膜 失败：{mask_path}")
 
     if mask.shape != (height, width):
-        raise RuntimeError(f"Mask 尺寸与视频帧不一致：{mask_path}")
+        raise RuntimeError(f"掩膜 尺寸与视频帧不一致：{mask_path}")
 
     return mask
 
@@ -79,8 +80,8 @@ def _load_saved_mask(
 def _select_target_roi(
     image: np.ndarray,
     frame_number: int,
-    window_prefix: str = "1 Select Target",
-    instruction: str = "Drag a box around the target, then press Enter",
+    window_prefix: str = "1 框选目标",
+    instruction: str = "用鼠标框住目标，然后按回车",
 ) -> tuple[int, int, int, int]:
     """在完整画面中框选目标，返回原分辨率坐标 (x, y, w, h)。"""
     height, width = image.shape[:2]
@@ -100,7 +101,9 @@ def _select_target_roi(
     )
 
     # 说明直接画在框选窗口里，不能只打印到控制台。
-    banner_height = 56
+    title_size = max(18, min(30, int(round(preview.shape[0] / 35))))
+    hint_size = max(14, int(round(title_size * 0.7)))
+    banner_height = title_size + hint_size + 18
     banner = preview.copy()
     cv2.rectangle(
         banner,
@@ -110,25 +113,20 @@ def _select_target_roi(
         -1,
     )
     preview = cv2.addWeighted(banner, 0.55, preview, 0.45, 0)
-    cv2.putText(
+    draw_text(
         preview,
         instruction,
-        (12, 23),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (0, 255, 255),
-        2,
-        cv2.LINE_AA,
+        (12, 4),
+        size=title_size,
+        color=(0, 255, 255),
     )
-    cv2.putText(
+    draw_text(
         preview,
-        "Enter/Space = confirm    C = cancel",
-        (12, 46),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (255, 255, 255),
-        1,
-        cv2.LINE_AA,
+        "回车/空格：确认    C：取消",
+        (12, 4 + title_size + 2),
+        size=hint_size,
+        color=(255, 255, 255),
+        stroke=1,
     )
     select_window = f"{window_prefix} - frame_{frame_number:04d}"
 
@@ -136,7 +134,7 @@ def _select_target_roi(
     print("=" * 60)
     print(f"frame_{frame_number:04d}")
     print("第一步：鼠标框住完整目标对象")
-    print("框好以后按 Enter")
+    print("框好以后按回车")
     print("=" * 60)
 
     try:
@@ -180,7 +178,7 @@ def _edit_manual_frame(
     )
 
     if mask_path.exists() and not force:
-        print(f"frame_{frame_number:04d}：读取已有手动 Mask")
+        print(f"frame_{frame_number:04d}：读取已有手动 掩膜")
         return _load_saved_mask(mask_path, width, height)
 
     # 第一步：在完整画面中框选目标对象。
@@ -189,7 +187,7 @@ def _edit_manual_frame(
         frame_number,
     )
 
-    # 第二步：在局部区域内使用 GrabCut 生成初始 Mask。
+    # 第二步：在局部区域内使用 GrabCut 生成初始 掩膜。
     x0 = max(0, x - MANUAL_ROI_PADDING)
     y0 = max(0, y - MANUAL_ROI_PADDING)
     x1 = min(width, x + object_width + MANUAL_ROI_PADDING)
@@ -229,7 +227,7 @@ def _edit_manual_frame(
         0,
     ).astype(np.uint8)
 
-    # 第三步：由用户补充或擦除 Mask。
+    # 第三步：由用户补充或擦除 掩膜。
     work_mask = initial_mask.copy()
     state = {
         "drawing": False,
@@ -239,7 +237,7 @@ def _edit_manual_frame(
 
     zoom = min(1200 / crop_width, 800 / crop_height)
     zoom = max(1.0, min(5.0, zoom))
-    edit_window = f"2 Edit Mask - frame_{frame_number:04d}"
+    edit_window = f"2 编辑掩膜 - frame_{frame_number:04d}"
     cv2.namedWindow(edit_window, cv2.WINDOW_AUTOSIZE)
 
     def draw_at(mouse_x: int, mouse_y: int, erase: bool = False) -> None:
@@ -284,25 +282,22 @@ def _edit_manual_frame(
     print("右键拖动：擦除背景")
     print("] 或 +：增大画笔")
     print("[ 或 -：减小画笔")
-    print("C：清空 Mask")
-    print("R：恢复 GrabCut 初始 Mask")
+    print("C：清空掩膜")
+    print("R：恢复 GrabCut 初始掩膜")
     print("A：将整个框选矩形作为前景")
-    print("Enter：保存并进入下一帧")
+    print("回车：保存并进入下一帧")
 
     while True:
         display = crop.copy()
         overlay = display.copy()
         overlay[work_mask > 0] = (0, 255, 0)
         display = cv2.addWeighted(display, 0.72, overlay, 0.28, 0)
-        cv2.putText(
+        draw_text(
             display,
-            f"frame_{frame_number:04d}  brush={state['radius']}px",
-            (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 255, 255),
-            2,
-            cv2.LINE_AA,
+            f"frame_{frame_number:04d}  画笔={state['radius']} 像素",
+            (10, 5),
+            size=20,
+            color=(0, 255, 255),
         )
         display_big = cv2.resize(
             display,
@@ -336,7 +331,7 @@ def _edit_manual_frame(
     full_mask = np.zeros((height, width), dtype=np.uint8)
     full_mask[y0:y1, x0:x1] = work_mask
     write_image(mask_path, full_mask)
-    print(f"保存手动 Mask：{mask_path.name}")
+    print(f"保存手动 掩膜：{mask_path.name}")
     return full_mask
 
 
@@ -584,8 +579,8 @@ def detect_background_object(
     """检测固定在背景帧里的目标。
 
     背景帧通常直接当作画布，但它里面往往也有目标。这里单独检测一次，
-    不参与 generate_motion_masks 的时序先验，因此不会改变其它帧的 Mask。
-    背景帧没有可检测目标时返回空 Mask。
+    不参与 generate_motion_masks 的时序先验，因此不会改变其它帧的 掩膜。
+    背景帧没有可检测目标时返回空 掩膜。
     """
     height, width = images[0].shape[:2]
     empty = np.zeros((height, width), dtype=np.uint8)
@@ -625,7 +620,7 @@ def generate_motion_masks(
     force: bool,
     base_index: int,
 ) -> list[np.ndarray]:
-    """通过背景差分和位置连续性生成运动目标 Mask。"""
+    """通过背景差分和位置连续性生成运动目标 掩膜。"""
     if len(images) < 2:
         raise RuntimeError("自动提取运动目标至少需要两张抽帧。")
 
@@ -665,7 +660,7 @@ def generate_motion_masks(
                     float(mask_y.mean() * MOTION_SCALE),
                 )
 
-            print(f"frame_{frame_number:04d}：读取已有运动 Mask")
+            print(f"frame_{frame_number:04d}：读取已有运动 掩膜")
             continue
 
         detected = _detect_motion_bbox(
@@ -682,7 +677,7 @@ def generate_motion_masks(
             masks.append(mask)
             print(
                 f"frame_{frame_number:04d}："
-                "自动定位失败，本帧使用空 Mask"
+                "自动定位失败，本帧使用空 掩膜"
             )
             continue
 
@@ -697,7 +692,7 @@ def generate_motion_masks(
         )
         write_image(mask_path, mask)
         masks.append(mask)
-        print(f"frame_{frame_number:04d}：运动 Mask 已保存")
+        print(f"frame_{frame_number:04d}：运动 掩膜 已保存")
 
     return masks
 
@@ -717,10 +712,10 @@ def _load_background_selection(
     width: int,
     height: int,
 ) -> tuple[str, np.ndarray | None]:
-    """读取背景帧缓存，返回 (来源, Mask)。
+    """读取背景帧缓存，返回 (来源, 掩膜)。
 
     没有缓存时来源为 auto。state 文件记录 base_frame，换了背景帧编号就
-    不再复用旧结果；跳过状态必须由 state 明确记录，不能靠空 Mask 推断。
+    不再复用旧结果；跳过状态必须由 state 明确记录，不能靠空 掩膜 推断。
     """
     mask_path, state_path = _background_cache_paths(corrected_mask_dir)
 
@@ -744,7 +739,7 @@ def _load_background_selection(
         raise RuntimeError(f"背景帧缓存状态无效：{state_path}")
 
     if not mask_path.exists():
-        print("背景帧人工 Mask 缓存缺失，改用自动检测。")
+        print("背景帧人工 掩膜 缓存缺失，改用自动检测。")
         return BACKGROUND_SOURCE_AUTO, None
 
     return (
@@ -759,13 +754,13 @@ def _save_background_selection(
     source: str,
     mask: np.ndarray | None,
 ) -> None:
-    """保存背景帧人工 Mask 或跳过状态。"""
+    """保存背景帧人工 掩膜 或跳过状态。"""
     corrected_mask_dir.mkdir(parents=True, exist_ok=True)
     mask_path, state_path = _background_cache_paths(corrected_mask_dir)
 
     if source == BACKGROUND_SOURCE_MANUAL:
         if mask is None:
-            raise ValueError("保存背景帧人工 Mask 时缺少 Mask。")
+            raise ValueError("保存背景帧人工 掩膜 时缺少 掩膜。")
 
         write_image(mask_path, mask)
     elif mask_path.exists():
@@ -793,6 +788,22 @@ def _clear_background_selection(corrected_mask_dir: Path) -> None:
             path.unlink()
 
 
+def _tracker_label(name: str) -> str:
+    return {
+        "sam2": "SAM 2.1",
+        "motion": "背景差分",
+    }.get(name, name)
+
+
+def _mask_source_label(source: str) -> str:
+    return {
+        "auto": "自动",
+        "manual": "人工",
+        "skipped": "已跳过",
+        "empty": "空",
+    }.get(source.lower(), source)
+
+
 def _review_background_frame(
     images: list[np.ndarray],
     auto_mask: np.ndarray,
@@ -808,11 +819,11 @@ def _review_background_frame(
     restore_mask: Callable[[int], np.ndarray] | None = None,
     manual_mask_path: Path | None = None,
 ) -> np.ndarray | None:
-    """复核背景帧目标；返回确认的 Mask，用户跳过时返回 None。"""
+    """复核背景帧目标；返回确认的 掩膜，用户跳过时返回 None。"""
     height, width = images[0].shape[:2]
     frame_name = f"frame_{base_index + 1:04d}"
     display_scale = min(1500 / width, 850 / height, 1.0)
-    window_name = f"Review Base Frame - {frame_name}"
+    window_name = f"复核背景帧 - {frame_name}"
     corrected_mask_dir.mkdir(parents=True, exist_ok=True)
     edit_mask_path = (
         manual_mask_path
@@ -826,7 +837,7 @@ def _review_background_frame(
         if force and state_path.exists():
             print("--force：忽略已有背景帧人工缓存，重新使用自动检测。")
             # 先不删除旧缓存：用户可能只是看一眼自动结果就取消。确认接受
-            # 自动 Mask 时再清理，避免 --force 意外丢掉修正结果。
+            # 自动 掩膜 时再清理，避免 --force 意外丢掉修正结果。
             mask_source, cached_mask = BACKGROUND_SOURCE_AUTO, None
         else:
             mask_source, cached_mask = _load_background_selection(
@@ -840,10 +851,10 @@ def _review_background_frame(
 
     if mask_source == BACKGROUND_SOURCE_MANUAL and cached_mask is not None:
         working_mask = cached_mask
-        print(f"{frame_name}：读取已有背景帧人工 Mask")
+        print(f"{frame_name}：读取已有背景帧人工 掩膜")
     elif mask_source == BACKGROUND_SOURCE_MANUAL:
         working_mask = auto_mask.copy()
-        print(f"{frame_name}：当前背景帧使用人工修正 Mask")
+        print(f"{frame_name}：当前背景帧使用人工修正 掩膜")
     elif mask_source == BACKGROUND_SOURCE_SKIPPED:
         working_mask = np.zeros((height, width), dtype=np.uint8)
         print(f"{frame_name}：读取已有背景帧跳过状态")
@@ -853,15 +864,17 @@ def _review_background_frame(
 
     print()
     print("=" * 60)
-    print(f"BASE FRAME：{frame_name}")
-    print("Enter 或空格：接受当前背景 Mask")
-    print("M：手动重新框选并修正背景 Mask")
-    print("R：恢复背景帧自动检测 Mask")
+    print(f"背景帧：{frame_name}")
+    print("回车或空格：接受当前背景掩膜")
+    print("M：手动重新框选并修正背景掩膜")
+    print("R：恢复背景帧自动检测掩膜")
     print("S：跳过背景目标，不擦除也不纳入残影序列")
     print("Q 或 Esc：取消本次选择")
     print("=" * 60)
 
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    title_size = max(20, int(round(height / 45)))
+    hint_size = max(16, int(round(height / 60)))
 
     try:
         while True:
@@ -881,42 +894,33 @@ def _review_background_frame(
 
             time_seconds = base_index * interval
             state_text = (
-                "SKIPPED"
+                "已跳过"
                 if mask_source == BACKGROUND_SOURCE_SKIPPED
-                else "UNDECIDED"
+                else "未确认"
             )
-            cv2.putText(
+            draw_text(
                 preview,
-                f"BASE FRAME  {frame_name}  t~{time_seconds:.1f}s  "
-                f"Tracker: {tracker_name.upper()}  "
-                f"Mask: {mask_source.upper()}  Current: {state_text}",
-                (30, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.1,
-                (0, 255, 255),
-                3,
-                cv2.LINE_AA,
+                f"背景帧  {frame_name}  时间 {time_seconds:.1f} 秒  "
+                f"跟踪器：{_tracker_label(tracker_name)}  "
+                f"掩膜：{_mask_source_label(mask_source)}  "
+                f"当前：{state_text}",
+                (30, 20),
+                size=title_size,
+                color=(0, 255, 255),
             )
-            cv2.putText(
+            draw_text(
                 preview,
-                "Enter/Space=accept   M=manual correction   "
-                "R=restore auto",
-                (30, 100),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 255, 255),
-                2,
-                cv2.LINE_AA,
+                "回车/空格：接受    M：手动修正    R：恢复自动",
+                (30, 20 + int(title_size * 1.7)),
+                size=hint_size,
+                color=(0, 255, 255),
             )
-            cv2.putText(
+            draw_text(
                 preview,
-                "S=skip background target   Q/Esc=cancel",
-                (30, 150),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 255, 255),
-                2,
-                cv2.LINE_AA,
+                "S：跳过背景目标    Q/Esc：取消",
+                (30, 20 + int(title_size * 1.7) + int(hint_size * 1.6)),
+                size=hint_size,
+                color=(0, 255, 255),
             )
             preview = cv2.resize(
                 preview,
@@ -952,7 +956,7 @@ def _review_background_frame(
                         _clear_background_selection(corrected_mask_dir)
 
                 print(
-                    f"{frame_name}：接受背景帧 Mask"
+                    f"{frame_name}：接受背景帧 掩膜"
                     f"（{mask_source.upper()}）"
                 )
                 return working_mask.copy()
@@ -991,7 +995,7 @@ def _review_background_frame(
                         BACKGROUND_SOURCE_MANUAL,
                         working_mask,
                     )
-                print(f"{frame_name}：背景帧已使用人工修正 Mask")
+                print(f"{frame_name}：背景帧已使用人工修正 掩膜")
                 continue
 
             if key in (ord("r"), ord("R")):
@@ -1003,7 +1007,7 @@ def _review_background_frame(
                 mask_source = BACKGROUND_SOURCE_AUTO
                 if cache_background:
                     _clear_background_selection(corrected_mask_dir)
-                print(f"{frame_name}：已恢复背景帧自动 Mask")
+                print(f"{frame_name}：已恢复背景帧自动 掩膜")
                 continue
 
             if key in (27, ord("q"), ord("Q")):
@@ -1023,13 +1027,13 @@ def select_motion_masks(
     force: bool = False,
     tracking: TrackingHooks | None = None,
 ) -> SelectionResult:
-    """逐帧预览自动 Mask，由用户决定是否纳入最终叠加图。
+    """逐帧预览自动 掩膜，由用户决定是否纳入最终叠加图。
 
     background_auto_mask 不为 None 时，先复核背景帧再进入普通候选帧；
     返回的 background_mask 为最终确认结果，None 表示用户主动跳过。
     """
     if len(images) != len(motion_masks):
-        raise RuntimeError("预览帧数量与运动 Mask 数量不一致。")
+        raise RuntimeError("预览帧数量与运动 掩膜 数量不一致。")
 
     tracking = tracking or TrackingHooks()
     height, width = images[0].shape[:2]
@@ -1038,11 +1042,11 @@ def select_motion_masks(
         background_auto_mask is not None
         and background_auto_mask.shape != (height, width)
     ):
-        raise RuntimeError("背景帧 Mask 尺寸与视频帧不一致。")
+        raise RuntimeError("背景帧 掩膜 尺寸与视频帧不一致。")
 
     selections: dict[str, bool] = {}
     display_scale = min(1500 / width, 850 / height, 1.0)
-    window_name = "Select Target Moments"
+    window_name = "逐帧筛选目标时刻"
     candidate_indices = [
         index
         for index in range(len(images))
@@ -1078,7 +1082,7 @@ def select_motion_masks(
                 corrected_indices.add(frame_index)
 
         if corrected_indices:
-            print(f"复用已有人工修正 Mask：{len(corrected_indices)} 张")
+            print(f"复用已有人工修正 掩膜：{len(corrected_indices)} 张")
 
     def build_selected_masks() -> list[np.ndarray]:
         result: list[np.ndarray] = []
@@ -1121,7 +1125,7 @@ def select_motion_masks(
 
     def apply_tracker_masks(updated_masks: list[np.ndarray]) -> None:
         if len(updated_masks) != len(working_masks):
-            raise RuntimeError("跟踪器返回的 Mask 数量与抽帧数量不一致。")
+            raise RuntimeError("跟踪器返回的 掩膜 数量与抽帧数量不一致。")
 
         for index, mask in enumerate(updated_masks):
             working_masks[index] = mask.copy()
@@ -1180,13 +1184,15 @@ def select_motion_masks(
     print("S：跳过当前目标")
     print("B 或 Backspace：回退上一帧")
     print("M：手动重新框选并修正当前目标")
-    print("R：恢复当前帧的自动 Mask")
+    print("R：恢复当前帧的自动 掩膜")
     print("Q 或 Esc：取消本次选择")
     print(
         "首个普通候选帧再按 B 会返回背景帧复核。"
     )
 
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    title_size = max(20, int(round(height / 45)))
+    hint_size = max(16, int(round(height / 60)))
 
     try:
         while True:
@@ -1230,25 +1236,19 @@ def select_motion_masks(
             while cursor <= len(candidate_indices):
                 if cursor == len(candidate_indices):
                     preview = cumulative.copy()
-                    cv2.putText(
+                    draw_text(
                         preview,
-                        f"Selection complete  Included: {included_count}",
-                        (30, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        1.1,
-                        (0, 255, 255),
-                        3,
-                        cv2.LINE_AA,
+                        f"筛选完成  已纳入：{included_count}",
+                        (30, 20),
+                        size=title_size,
+                        color=(0, 255, 255),
                     )
-                    cv2.putText(
+                    draw_text(
                         preview,
-                        "Enter/Space=finish   B/Backspace=back   Q=cancel",
-                        (30, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.9,
-                        (0, 255, 255),
-                        2,
-                        cv2.LINE_AA,
+                        "回车/空格：完成    B/退格：回退    Q：取消",
+                        (30, 20 + int(title_size * 1.7)),
+                        size=hint_size,
+                        color=(0, 255, 255),
                     )
                     preview = cv2.resize(
                         preview,
@@ -1291,51 +1291,43 @@ def select_motion_masks(
                 time_seconds = frame_index * interval
                 current_state = selections.get(frame_name)
                 mask_source = (
-                    "MANUAL"
+                    "manual"
                     if frame_index in corrected_indices
-                    else "EMPTY"
+                    else "empty"
                     if not np.any(selected)
-                    else "AUTO"
+                    else "auto"
                 )
                 state_text = (
-                    "INCLUDED"
+                    "已纳入"
                     if current_state is True
-                    else "SKIPPED"
+                    else "已跳过"
                     if current_state is False
-                    else "UNDECIDED"
+                    else "未选择"
                 )
-                cv2.putText(
+                draw_text(
                     preview,
-                    f"{frame_name}  t~{time_seconds:.1f}s  "
-                    f"Tracker: {tracking.name.upper()}  "
-                    f"Mask: {mask_source}  Current: {state_text}",
-                    (30, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.1,
-                    (0, 255, 255),
-                    3,
-                    cv2.LINE_AA,
+                    f"{frame_name}  时间 {time_seconds:.1f} 秒  "
+                    f"跟踪器：{_tracker_label(tracking.name)}  "
+                    f"掩膜：{_mask_source_label(mask_source)}  "
+                    f"当前：{state_text}",
+                    (30, 20),
+                    size=title_size,
+                    color=(0, 255, 255),
                 )
-                cv2.putText(
+                draw_text(
                     preview,
-                    f"Included: {included_count}   "
-                    "Enter/Space=include   S=skip   B=back   Q=quit",
-                    (30, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 255, 255),
-                    2,
-                    cv2.LINE_AA,
+                    f"已纳入：{included_count}    "
+                    "回车/空格：纳入    S：跳过    B：回退    Q：退出",
+                    (30, 20 + int(title_size * 1.7)),
+                    size=hint_size,
+                    color=(0, 255, 255),
                 )
-                cv2.putText(
+                draw_text(
                     preview,
-                    "M=manual correction   R=restore auto mask",
-                    (30, 150),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 255, 255),
-                    2,
-                    cv2.LINE_AA,
+                    "M：手动修正    R：恢复自动掩膜",
+                    (30, 20 + int(title_size * 1.7) + int(hint_size * 1.6)),
+                    size=hint_size,
+                    color=(0, 255, 255),
                 )
                 preview = cv2.resize(
                     preview,
@@ -1388,7 +1380,7 @@ def select_motion_masks(
                     )
                     correct_frame(frame_index, edited_mask)
                     cumulative, included_count = build_cumulative(cursor)
-                    print(f"{frame_name}：已使用人工修正 Mask")
+                    print(f"{frame_name}：已使用人工修正 掩膜")
                     continue
 
                 if key in (ord("r"), ord("R")):
@@ -1397,11 +1389,11 @@ def select_motion_masks(
                     cumulative, included_count = build_cumulative(cursor)
 
                     if had_manual:
-                        print(f"{frame_name}：已恢复自动 Mask")
+                        print(f"{frame_name}：已恢复自动 掩膜")
                     else:
                         print(
                             f"{frame_name}：没有人工修正，"
-                            "保持自动 Mask"
+                            "保持自动 掩膜"
                         )
 
                     continue

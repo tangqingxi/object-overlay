@@ -16,6 +16,11 @@ from .video import cast_pixels, read_image, write_image
 # 残影版中最早时刻的不透明度，最新时刻始终为 1.0。
 GHOST_MIN_ALPHA = 0.15
 
+# 默认只给 12 个时刻盖章，避免几十个相邻残影糊成实体链；0 表示全部。
+GHOST_KEYFRAMES = 12
+# 旧残影的衰减指数：1=线性，2=旧的更快变淡。
+GHOST_FADE_EXPONENT = 2.0
+
 
 @dataclass(frozen=True)
 class CompositionResult:
@@ -285,6 +290,28 @@ def _draw_path(
     draw_trajectory(canvas, samples, sample_taus, min_alpha, color, outline)
 
 
+def _select_ghost_positions(
+    count: int,
+    keyframes: int,
+) -> list[int]:
+    """从全部时刻中挑选要盖章的位置。
+
+    只影响残影盖章数量，不影响轨迹线和背景擦除使用的全部时刻。
+    keyframes=0 或大于等于 count 时保留全部；keyframes=1 时只保留最新帧。
+    """
+    if count <= 0:
+        return []
+
+    if keyframes <= 0 or keyframes >= count:
+        return list(range(count))
+
+    if keyframes == 1:
+        return [count - 1]
+
+    positions = np.linspace(0, count - 1, keyframes).round().astype(int)
+    return sorted({int(position) for position in positions})
+
+
 def compose_ghost_overlay(
     frame_files: list[Path],
     masks: list[np.ndarray],
@@ -295,6 +322,8 @@ def compose_ghost_overlay(
     show_trajectory: bool = True,
     trajectory_color: tuple[int, int, int] = TRAJECTORY_COLOR,
     trajectory_outline: bool = True,
+    keyframes: int = GHOST_KEYFRAMES,
+    fade_exponent: float = GHOST_FADE_EXPONENT,
 ) -> Path:
     """生成带轨迹线与时间渐隐的叠加图。
 
@@ -304,6 +333,9 @@ def compose_ghost_overlay(
     background_mask 给出背景帧里目标的位置。背景帧并非纯背景，它里面的
     目标同样是序列中的一个时刻：先把它从画布上擦掉，再让它作为第一个
     时刻参与渐隐，否则它会以完整不透明留在画面里、脱离轨迹线。
+
+    keyframes 只控制实际盖章的残影数量，轨迹线和背景擦除仍使用全部时刻。
+    fade_exponent 控制旧残影变淡速度：1 为线性，2 让旧残影更快消失。
     """
     if len(frame_files) != len(masks):
         raise RuntimeError("视频帧数量与 Mask 数量不一致。")
@@ -332,6 +364,7 @@ def compose_ghost_overlay(
             moments.append((frame_index, center))
 
     taus = _normalized_times([frame_index for frame_index, _ in moments])
+    render_positions = _select_ghost_positions(len(moments), keyframes)
 
     if np.any(effective_masks[base_index] > 0):
         _erase_background_object(
@@ -361,13 +394,15 @@ def compose_ghost_overlay(
             trajectory_outline,
         )
 
-    for (frame_index, _center), tau in zip(moments, taus):
+    for position in render_positions:
+        frame_index, _center = moments[position]
+        tau = taus[position]
         selected = effective_masks[frame_index] > 0
 
         if not np.any(selected):
             continue
 
-        alpha = min_alpha + (1.0 - min_alpha) * tau
+        alpha = min_alpha + (1.0 - min_alpha) * (tau**fade_exponent)
         source = _read_matching_source(
             frame_files[frame_index],
             canvas,

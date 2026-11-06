@@ -2,7 +2,11 @@ import argparse
 import sys
 from pathlib import Path
 
-from .compose import GHOST_MIN_ALPHA
+from .compose import (
+    GHOST_FADE_EXPONENT,
+    GHOST_KEYFRAMES,
+    GHOST_MIN_ALPHA,
+)
 from .pipeline import (
     DEFAULT_SAM2_MODEL,
     DEFAULT_SAM2_TRACK_FPS,
@@ -83,12 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="作为固定背景的抽帧编号，默认 1",
     )
 
-    targets = parser.add_argument_group("目标 Mask")
+    targets = parser.add_argument_group("目标掩膜")
     targets.add_argument(
         "--force",
         action="store_true",
         help=(
-            "忽略自动 Mask 缓存并重新生成；"
+            "忽略自动掩膜缓存并重新生成；"
             "SAM 2.1 人工锚点会保留"
         ),
     )
@@ -97,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "逐帧复核自动识别的结果：先复核背景帧，"
-            "再剔除认错的对象；Mask 不准的还能手动修正"
+            "再剔除认错的对象；掩膜不准的还能手动修正"
         ),
     )
 
@@ -107,7 +111,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=TRACKERS,
         default="sam2",
         help=(
-            "目标 Mask 后端：sam2=SAM 2.1 视频跟踪（默认），"
+            "目标掩膜后端：sam2=SAM 2.1 视频跟踪（默认），"
             "motion=保留的背景差分后备"
         ),
     )
@@ -132,8 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_SAM2_TRACK_FPS,
         help=(
-            "SAM 2.1 密集跟踪采样的目标帧率，"
-            f"默认 {DEFAULT_SAM2_TRACK_FPS:g}；输出仍按 --interval"
+            "SAM 2.1 密集跟踪采样的目标速度，"
+            f"默认 {DEFAULT_SAM2_TRACK_FPS:g} 帧/秒；输出仍按 --interval"
         ),
     )
     tracking.add_argument(
@@ -172,6 +176,28 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "最早时刻的不透明度，范围 (0, 1]，"
             f"默认 {GHOST_MIN_ALPHA:g}"
+        ),
+    )
+    ghost.add_argument(
+        "--ghost-keyframes",
+        type=int,
+        default=GHOST_KEYFRAMES,
+        metavar="N",
+        help=(
+            "实际盖章的残影时刻数；越少越像频闪轨迹，"
+            "0=全部时刻，"
+            f"默认 {GHOST_KEYFRAMES}"
+        ),
+    )
+    ghost.add_argument(
+        "--ghost-fade-exponent",
+        type=float,
+        default=GHOST_FADE_EXPONENT,
+        metavar="指数",
+        help=(
+            "旧残影衰减指数：1=线性，2=旧影更快变淡、"
+            "轨迹更清楚，"
+            f"默认 {GHOST_FADE_EXPONENT:g}"
         ),
     )
     ghost.add_argument(
@@ -220,6 +246,8 @@ def main(argv: list[str] | None = None) -> int:
         sam2_track_fps=args.sam2_track_fps,
         sam2_init_box=args.sam2_init_box,
         ghost_min_alpha=args.ghost_min_alpha,
+        ghost_keyframes=args.ghost_keyframes,
+        ghost_fade_exponent=args.ghost_fade_exponent,
         show_trajectory=args.trajectory,
         trajectory_color=args.trajectory_color,
         trajectory_outline=args.trajectory_outline,

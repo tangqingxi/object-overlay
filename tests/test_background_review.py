@@ -90,7 +90,10 @@ class BackgroundReviewTest(unittest.TestCase):
             patch("cv2.imshow", side_effect=capture_preview),
             patch("cv2.waitKey", side_effect=keys),
             patch("cv2.destroyWindow"),
-            patch("cv2.putText", side_effect=capture_text),
+            patch(
+                "object_overlay.masking.draw_text",
+                side_effect=capture_text,
+            ),
         ]
 
         if edit_mask is None:
@@ -141,7 +144,7 @@ class BackgroundReviewTest(unittest.TestCase):
                 corrected_dir=corrected_dir,
             )
 
-            self.assertTrue(texts[0].startswith("BASE FRAME"))
+            self.assertTrue(texts[0].startswith("背景帧"))
             self.assertIn("frame_0001", texts[0])
             self.assertIsNotNone(result.background_mask)
             np.testing.assert_array_equal(
@@ -152,7 +155,7 @@ class BackgroundReviewTest(unittest.TestCase):
             candidate_texts = [
                 text
                 for text in texts
-                if text.startswith("frame_") and "BASE FRAME" not in text
+                if text.startswith("frame_") and "背景帧" not in text
             ]
             self.assertTrue(candidate_texts[0].startswith("frame_0002"))
             self.assertFalse(
@@ -217,8 +220,8 @@ class BackgroundReviewTest(unittest.TestCase):
                 corrected_dir=corrected_dir,
             )
 
-            self.assertIn("Mask: MANUAL", texts[0])
-            self.assertIn("Mask: AUTO", texts[3])
+            self.assertIn("掩膜：人工", texts[0])
+            self.assertIn("掩膜：自动", texts[3])
             np.testing.assert_array_equal(
                 result.background_mask,
                 auto_mask,
@@ -273,7 +276,7 @@ class BackgroundReviewTest(unittest.TestCase):
                 _state(corrected_dir)["source"],
                 BACKGROUND_SOURCE_MANUAL,
             )
-            self.assertIn("Mask: MANUAL", texts[0])
+            self.assertIn("掩膜：人工", texts[0])
 
     def test_首个候选帧按B返回背景帧(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -288,7 +291,7 @@ class BackgroundReviewTest(unittest.TestCase):
             )
 
             base_texts = [
-                text for text in texts if text.startswith("BASE FRAME")
+                text for text in texts if text.startswith("背景帧")
             ]
             self.assertEqual(len(base_texts), 2)
             self.assertEqual(
@@ -314,7 +317,7 @@ class BackgroundReviewTest(unittest.TestCase):
                 corrected_dir=corrected_dir,
             )
 
-            self.assertIn("BASE FRAME", texts[0])
+            self.assertIn("背景帧", texts[0])
             self.assertIn("frame_0010", texts[0])
             self.assertIsNone(result.background_mask)
             self.assertEqual(_state(corrected_dir)["base_frame"], 10)
@@ -343,7 +346,7 @@ class BackgroundReviewTest(unittest.TestCase):
             )
 
             self.assertIsNone(edit_manual)
-            self.assertIn("Mask: MANUAL", texts[0])
+            self.assertIn("掩膜：人工", texts[0])
             np.testing.assert_array_equal(
                 result.background_mask,
                 manual_mask,
@@ -370,7 +373,7 @@ class BackgroundReviewTest(unittest.TestCase):
                 corrected_dir=corrected_dir,
             )
 
-            self.assertIn("Mask: AUTO", texts[0])
+            self.assertIn("掩膜：自动", texts[0])
             np.testing.assert_array_equal(
                 result.background_mask,
                 auto_mask,
@@ -394,7 +397,7 @@ class BackgroundReviewTest(unittest.TestCase):
 
             self.assertIsNone(result.background_mask)
             self.assertFalse(
-                any(text.startswith("BASE FRAME") for text in texts)
+                any(text.startswith("背景帧") for text in texts)
             )
             self.assertTrue(texts[0].startswith("frame_0002"))
 
@@ -462,7 +465,7 @@ class Sam2SelectionHooksTest(unittest.TestCase):
             patch("cv2.waitKey", side_effect=keys),
             patch("cv2.destroyWindow"),
             patch(
-                "cv2.putText",
+                "object_overlay.masking.draw_text",
                 side_effect=lambda _image, text, *_args, **_kwargs: (
                     texts.append(text)
                 ),
@@ -498,7 +501,7 @@ class Sam2SelectionHooksTest(unittest.TestCase):
 
             edit_manual.assert_called_once()
             self.assertTrue(
-                any("Mask: MANUAL" in text for text in texts)
+                any("掩膜：人工" in text for text in texts)
             )
             self.assertEqual(len(correct_calls), 1)
             self.assertEqual(correct_calls[0][0], 0)

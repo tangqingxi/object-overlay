@@ -23,6 +23,7 @@ from .masking import (
     _load_saved_mask,
     _select_target_roi,
 )
+from .text import draw_text
 from .video import find_ffmpeg, read_image, write_image
 
 
@@ -597,7 +598,7 @@ class Sam2Tracker:
 
         box = self.initial_box
         mask: np.ndarray | None = None
-        mask_source = "AUTO"
+        mask_source = "自动"
 
         while True:
             if mask is None:
@@ -605,15 +606,12 @@ class Sam2Tracker:
                     box = _select_target_roi(
                         self.images[self.base_index],
                         self.base_index + 1,
-                        window_prefix="1 Select SAM2 Target",
-                        instruction=(
-                            "SAM 2.1: drag a box around the target, "
-                            "then press Enter"
-                        ),
+                        window_prefix="1 框选 SAM 2.1 目标",
+                        instruction="SAM 2.1：用鼠标框住目标，然后按回车",
                     )
 
                 mask = self._prompt_box(box)
-                mask_source = "AUTO"
+                mask_source = "自动"
 
             action, reviewed = self._review_initial_mask(
                 mask,
@@ -648,7 +646,7 @@ class Sam2Tracker:
                     self.height,
                     mask_path=self._manual_path(self.base_index),
                 )
-                mask_source = "MANUAL"
+                mask_source = "人工"
                 # 修正后回到预览，由用户确认。
                 continue
 
@@ -687,17 +685,19 @@ class Sam2Tracker:
         self,
         mask: np.ndarray,
         *,
-        source: str = "AUTO",
+        source: str = "自动",
     ) -> tuple[str, np.ndarray]:
         frame_name = f"frame_{self.base_index + 1:04d}"
-        window_name = f"SAM2 Initial Target - {frame_name}"
+        window_name = f"SAM 2.1 初始目标 - {frame_name}"
         display_scale = min(1500 / self.width, 850 / self.height, 1.0)
+        title_size = max(20, int(round(self.height / 45)))
+        hint_size = max(16, int(round(self.height / 60)))
 
         print()
         print("=" * 60)
         print(f"SAM 2.1 初始目标：{frame_name}")
-        print("Enter 或空格：接受当前 SAM 2.1 Mask")
-        print("M：用现有编辑器修正 Mask")
+        print("回车或空格：接受当前 SAM 2.1 掩膜")
+        print("M：用现有编辑器修正掩膜")
         print("R：重新框选目标")
         print("Q 或 Esc：取消")
         print("=" * 60)
@@ -718,26 +718,20 @@ class Sam2Tracker:
                         pixels * 0.68 + green * 0.32
                     ).clip(0, 255).astype(np.uint8)
 
-                cv2.putText(
+                draw_text(
                     preview,
-                    f"SAM2 INITIAL TARGET  {frame_name}  "
-                    f"Mask: {source if np.any(mask) else 'EMPTY'}",
-                    (30, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 255, 255),
-                    3,
-                    cv2.LINE_AA,
+                    f"SAM 2.1 初始目标  {frame_name}  "
+                    f"掩膜：{source if np.any(mask) else '空'}",
+                    (30, 20),
+                    size=title_size,
+                    color=(0, 255, 255),
                 )
-                cv2.putText(
+                draw_text(
                     preview,
-                    "Enter/Space=accept  M=edit  R=reselect  Q=cancel",
-                    (30, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 255, 255),
-                    2,
-                    cv2.LINE_AA,
+                    "回车/空格：接受    M：编辑    R：重新框选    Q：取消",
+                    (30, 20 + int(title_size * 1.7)),
+                    size=hint_size,
+                    color=(0, 255, 255),
                 )
                 preview = cv2.resize(
                     preview,

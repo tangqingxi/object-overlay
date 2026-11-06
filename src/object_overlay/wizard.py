@@ -12,7 +12,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .menu import choose, prompt_text
-from .pipeline import RunConfig, default_output_dir
+from .pipeline import (
+    MODE_LABELS,
+    TRACKER_LABELS,
+    RunConfig,
+    default_output_dir,
+)
 from .sam2_tracker import resolve_checkpoint
 from .trajectory import format_hex_color, parse_hex_color
 
@@ -27,9 +32,9 @@ class Question:
 
 
 _MODE_OPTIONS = (
-    ("overlay", "只出无损叠加图"),
-    ("ghost", "只出残影版"),
-    ("both", "两个都出"),
+    ("overlay", "无损版", "只出无损叠加图"),
+    ("ghost", "残影版", "只出残影版"),
+    ("both", "两者都出", "两个都出"),
 )
 _INTERVAL_PRESETS = (0.5, 1.0, 2.0)
 _COLOR_PRESETS = (
@@ -40,14 +45,24 @@ _COLOR_PRESETS = (
 _CUSTOM = "自定义"
 
 _KEYS_HINT = (
-    "↑/↓ 选择   Enter 或 → 确认   ← 或 Esc 返回上一步（在第一题时取消）"
+    "↑/↓ 选择   回车或→ 确认   ← 或 Esc 返回上一步（在第一题时取消）"
 )
 
 _GHOST_MODES = ("ghost", "both")
 
 
+def _mode_options(
+    _config: RunConfig,
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (label, note) for _value, label, note in _MODE_OPTIONS
+    )
+
+
 def _mode_index(config: RunConfig) -> int:
-    return [value for value, _ in _MODE_OPTIONS].index(config.mode)
+    return [value for value, _label, _note in _MODE_OPTIONS].index(
+        config.mode
+    )
 
 
 def _apply_mode(config: RunConfig, index: int) -> RunConfig:
@@ -147,6 +162,103 @@ def _apply_color(config: RunConfig, index: int) -> RunConfig:
     return replace(config, trajectory_color=color)
 
 
+_GHOST_KEYFRAME_PRESETS = (12, 16, 24, 0)
+_GHOST_FADE_PRESETS = (2.0, 1.0, 2.5)
+
+
+def _ghost_keyframe_options(
+    _config: RunConfig,
+) -> tuple[tuple[str, str], ...]:
+    return (
+        ("12 个时刻", "推荐：每隔约 2 秒一个残影，轨迹最清楚"),
+        ("16 个时刻", "更密一些，适合快速运动"),
+        ("24 个时刻", "较连续，接近多次曝光"),
+        ("全部时刻", "旧效果：残影多，容易糊成实体链"),
+        (_CUSTOM, "手动输入数量；0 表示全部时刻"),
+    )
+
+
+def _ghost_keyframe_index(config: RunConfig) -> int:
+    if config.ghost_keyframes in _GHOST_KEYFRAME_PRESETS:
+        return _GHOST_KEYFRAME_PRESETS.index(config.ghost_keyframes)
+
+    return len(_GHOST_KEYFRAME_PRESETS)
+
+
+def _apply_ghost_keyframes(config: RunConfig, index: int) -> RunConfig:
+    if index < len(_GHOST_KEYFRAME_PRESETS):
+        return replace(
+            config,
+            ghost_keyframes=_GHOST_KEYFRAME_PRESETS[index],
+        )
+
+    answer = prompt_text(
+        "残影时刻数（0=全部）",
+        str(config.ghost_keyframes),
+    )
+
+    if answer is None:
+        return config
+
+    try:
+        value = int(answer)
+    except ValueError:
+        print(f"  无法识别为整数：{answer}，保持原设置")
+        return config
+
+    if value < 0:
+        print("  残影时刻数不能为负，保持原设置")
+        return config
+
+    return replace(config, ghost_keyframes=value)
+
+
+def _ghost_fade_options(
+    _config: RunConfig,
+) -> tuple[tuple[str, str], ...]:
+    return (
+        ("快速褪色", "推荐：衰减指数 2.0，旧残影更快变淡，轨迹更清楚"),
+        ("线性褪色", "衰减指数 1.0，从头到尾均匀变淡"),
+        ("更强褪色", "衰减指数 2.5，只突出最近几个时刻"),
+        (_CUSTOM, "手动输入衰减指数，必须大于 0"),
+    )
+
+
+def _ghost_fade_index(config: RunConfig) -> int:
+    if config.ghost_fade_exponent in _GHOST_FADE_PRESETS:
+        return _GHOST_FADE_PRESETS.index(config.ghost_fade_exponent)
+
+    return len(_GHOST_FADE_PRESETS)
+
+
+def _apply_ghost_fade(config: RunConfig, index: int) -> RunConfig:
+    if index < len(_GHOST_FADE_PRESETS):
+        return replace(
+            config,
+            ghost_fade_exponent=_GHOST_FADE_PRESETS[index],
+        )
+
+    answer = prompt_text(
+        "旧残影衰减指数",
+        f"{config.ghost_fade_exponent:g}",
+    )
+
+    if answer is None:
+        return config
+
+    try:
+        value = float(answer)
+    except ValueError:
+        print(f"  无法识别为数字：{answer}，保持原设置")
+        return config
+
+    if value <= 0:
+        print("  衰减指数必须大于 0，保持原设置")
+        return config
+
+    return replace(config, ghost_fade_exponent=value)
+
+
 def _interval_options(_config: RunConfig) -> tuple[tuple[str, str], ...]:
     return tuple(
         (f"{value:g} 秒", "每个候选位置之间的时间间隔")
@@ -185,7 +297,7 @@ def _apply_interval(config: RunConfig, index: int) -> RunConfig:
 
 _SELECT_OPTIONS = (
     ("否", "直接用自动识别的全部目标，认错了也照收"),
-    ("是", "逐帧看：先复核背景帧，再剔除认错的对象、修 Mask"),
+    ("是", "逐帧看：先复核背景帧，再剔除认错的对象、修掩膜"),
 )
 
 
@@ -205,7 +317,7 @@ def _build_questions() -> tuple[Question, ...]:
     return (
         Question(
             title="要生成哪种叠加图",
-            options=lambda _config: _MODE_OPTIONS,
+            options=_mode_options,
             current=_mode_index,
             apply=_apply_mode,
         ),
@@ -228,6 +340,20 @@ def _build_questions() -> tuple[Question, ...]:
             current=_color_index,
             apply=_apply_color,
             applies=lambda config: _is_ghost(config) and config.show_trajectory,
+        ),
+        Question(
+            title="残影密度",
+            options=_ghost_keyframe_options,
+            current=_ghost_keyframe_index,
+            apply=_apply_ghost_keyframes,
+            applies=_is_ghost,
+        ),
+        Question(
+            title="旧残影衰减",
+            options=_ghost_fade_options,
+            current=_ghost_fade_index,
+            apply=_apply_ghost_fade,
+            applies=_is_ghost,
         ),
         Question(
             title="抽帧间隔",
@@ -260,7 +386,7 @@ def _print_sam2_summary(config: RunConfig) -> None:
     print()
     print("  SAM 2.1 运行参数")
     print(f"    模型        {config.sam2_model}")
-    print(f"    跟踪帧率    {config.sam2_track_fps:g} FPS")
+    print(f"    跟踪帧率    {config.sam2_track_fps:g} 帧/秒")
     print(f"    权重路径    {checkpoint}")
 
 
@@ -274,8 +400,11 @@ def _summarize(config: RunConfig) -> None:
 
     print()
     print("将按以下设置生成：")
-    print(f"  输出内容    {config.mode}")
-    print(f"  目标跟踪    {config.tracker}")
+    print(f"  输出内容    {MODE_LABELS.get(config.mode, config.mode)}")
+    print(
+        "  目标跟踪    "
+        f"{TRACKER_LABELS.get(config.tracker, config.tracker)}"
+    )
     print(f"  输出目录    {_resolved_output_dir(config)}")
 
     if _is_ghost(config):
@@ -283,6 +412,18 @@ def _summarize(config: RunConfig) -> None:
 
         if config.show_trajectory:
             print(f"  轨迹线颜色  {format_hex_color(config.trajectory_color)}")
+
+        keyframes = (
+            "全部"
+            if config.ghost_keyframes == 0
+            else f"{config.ghost_keyframes} 个"
+        )
+        print(f"  残影时刻    {keyframes}（0=全部）")
+        print(
+            "  旧影衰减    "
+            f"指数 {config.ghost_fade_exponent:g}"
+            "（1=线性，越大旧影越淡）"
+        )
 
     print(f"  抽帧间隔    {config.interval:g} 秒")
     print(f"  逐帧复核    {'是' if config.select else '否'}")

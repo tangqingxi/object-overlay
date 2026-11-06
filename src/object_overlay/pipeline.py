@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .compose import (
+    GHOST_FADE_EXPONENT,
+    GHOST_KEYFRAMES,
     GHOST_MIN_ALPHA,
     CompositionResult,
     compose_ghost_overlay,
@@ -25,6 +27,15 @@ OUTPUT_MODES = ("overlay", "ghost", "both")
 
 # --tracker 的取值：原有背景差分 / SAM 2.1 视频跟踪。
 TRACKERS = ("motion", "sam2")
+MODE_LABELS = {
+    "overlay": "无损版",
+    "ghost": "残影版",
+    "both": "两者都出",
+}
+TRACKER_LABELS = {
+    "motion": "背景差分",
+    "sam2": "SAM 2.1",
+}
 DEFAULT_SAM2_MODEL = "sam2.1_hiera_small"
 DEFAULT_SAM2_TRACK_FPS = 15.0
 
@@ -63,6 +74,8 @@ class RunConfig:
     sam2_track_fps: float = DEFAULT_SAM2_TRACK_FPS
     sam2_init_box: tuple[int, int, int, int] | None = None
     ghost_min_alpha: float = GHOST_MIN_ALPHA
+    ghost_keyframes: int = GHOST_KEYFRAMES
+    ghost_fade_exponent: float = GHOST_FADE_EXPONENT
     show_trajectory: bool = True
     trajectory_color: tuple[int, int, int] = TRAJECTORY_COLOR
     trajectory_outline: bool = True
@@ -114,6 +127,12 @@ def _resolve_config(config: RunConfig) -> RunConfig:
     if not 0.0 < config.ghost_min_alpha <= 1.0:
         raise ValueError("--ghost-min-alpha 必须落在 (0, 1] 区间内")
 
+    if config.ghost_keyframes < 0:
+        raise ValueError("--ghost-keyframes 不能为负数（0 表示全部时刻）")
+
+    if config.ghost_fade_exponent <= 0:
+        raise ValueError("--ghost-fade-exponent 必须大于 0")
+
     if len(config.trajectory_color) != 3 or not all(
         0 <= channel <= 255 for channel in config.trajectory_color
     ):
@@ -138,6 +157,8 @@ def _resolve_config(config: RunConfig) -> RunConfig:
         sam2_track_fps=config.sam2_track_fps,
         sam2_init_box=config.sam2_init_box,
         ghost_min_alpha=config.ghost_min_alpha,
+        ghost_keyframes=config.ghost_keyframes,
+        ghost_fade_exponent=config.ghost_fade_exponent,
         show_trajectory=config.show_trajectory,
         trajectory_color=config.trajectory_color,
         trajectory_outline=config.trajectory_outline,
@@ -149,8 +170,11 @@ def _print_header(config: RunConfig, output_dir: Path, want_ghost: bool) -> None
     print("=" * 60)
     print(f"视频：{config.video_path}")
     print(f"输出目录：{output_dir}")
-    print(f"输出内容：{config.mode}")
-    print(f"跟踪后端：{config.tracker}")
+    print(f"输出内容：{MODE_LABELS.get(config.mode, config.mode)}")
+    print(
+        "跟踪后端："
+        f"{TRACKER_LABELS.get(config.tracker, config.tracker)}"
+    )
     print(f"抽帧间隔：{config.interval:g} 秒")
     print(f"背景帧：第 {config.base_frame} 张抽帧")
     print(f"人工筛选：{'是' if config.select else '否'}")
@@ -158,10 +182,15 @@ def _print_header(config: RunConfig, output_dir: Path, want_ghost: bool) -> None
     if config.tracker == "sam2":
         print(f"SAM 2.1 模型：{config.sam2_model}")
         print(f"SAM 2.1 权重：{config.sam2_checkpoint or 'checkpoints/<model>.pt'}")
-        print(f"SAM 2.1 跟踪采样：约 {config.sam2_track_fps:g} FPS")
+        print(f"SAM 2.1 跟踪采样：约 {config.sam2_track_fps:g} 帧/秒")
 
     if want_ghost:
         print(f"残影最早时刻不透明度：{config.ghost_min_alpha:g}")
+        print(
+            "残影时刻："
+            f"{'全部' if config.ghost_keyframes == 0 else config.ghost_keyframes} 个"
+        )
+        print(f"旧影衰减：指数 {config.ghost_fade_exponent:g}")
         print(f"轨迹线：{'开' if config.show_trajectory else '关'}")
 
         if config.show_trajectory:
@@ -185,10 +214,10 @@ def _print_summary(
     if overlay is not None:
         print(f"无损叠加图：{overlay.png_path}")
         print(f"预览 JPG：{overlay.jpg_path}")
-        print(f"Mask：{overlay.mask_path}")
+        print(f"掩膜：{overlay.mask_path}")
         print(f"最终 PNG dtype：{overlay.dtype}")
         print(f"最终 PNG 分辨率：{overlay.width} × {overlay.height}")
-        print(f"Mask 外背景最大像素差：{overlay.background_max_difference}")
+        print(f"掩膜外背景最大像素差：{overlay.background_max_difference}")
 
     if ghost_png is not None:
         print(f"残影叠加图：{ghost_png}")
@@ -339,6 +368,8 @@ def run_pipeline(config: RunConfig) -> RunResult:
             min_alpha=config.ghost_min_alpha,
             background_mask=background_mask,
             show_trajectory=config.show_trajectory,
+            keyframes=config.ghost_keyframes,
+            fade_exponent=config.ghost_fade_exponent,
             trajectory_color=config.trajectory_color,
             trajectory_outline=config.trajectory_outline,
         )

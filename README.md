@@ -110,7 +110,7 @@ SAM 版默认 `--tracker sam2`。`--tracker motion` 仍保留为后备，但 AI 
 
 ### 交互式菜单
 
-不加 `-y` 时仍会进入原有设置菜单，题目和顺序保持不变；不会新增 SAM 模型、跟踪帧率或权重路径的选择题。最后的“确认开始”清单会多出一段只读的 **SAM 2.1 运行参数**：
+不加 `-y` 时仍会进入原有设置菜单，题目和顺序保持不变；不会新增 SAM 模型、跟踪帧率或权重路径的选择题。OpenCV 窗口内的标题、提示和掩膜状态均使用中文显示。最后的“确认开始”清单会多出一段只读的 **SAM 2.1 运行参数**：
 
 ```text
   SAM 2.1 运行参数
@@ -178,9 +178,32 @@ SAM 版默认 `--tracker sam2`。`--tracker motion` 仍保留为后备，但 AI 
 | `--sam2-track-fps` | 浮点 | `15` | 密集跟踪采样目标帧率；输出仍按 `--interval` |
 | `--sam2-init-box` | `x,y,w,h` | 无 | 跳过鼠标框选，直接生成初始 Mask；仍会显示预览供确认 |
 | `--ghost-min-alpha` | `(0, 1]` | `0.15` | 残影最早时刻不透明度 |
+| `--ghost-keyframes` | 整数 | `12` | 实际盖章的残影时刻数；`0` 表示全部时刻 |
+| `--ghost-fade-exponent` | 浮点 | `2.0` | 旧残影衰减指数；`1` 为线性，越大旧影越淡 |
 | `--trajectory` / `--no-trajectory` | 开关 | 绘制 | 是否绘制轨迹线 |
 | `--trajectory-outline` / `--no-trajectory-outline` | 开关 | 加 | 轨迹线深色描边 |
 | `--trajectory-color` | `#RRGGBB` | `#FFA500` | 轨迹线颜色 |
+
+### 残影密度与旧影衰减
+
+`ghost` 不再默认把每个输出时刻都盖章。`--ghost-keyframes 12` 表示只取 12 个均匀时刻参与残影叠加；如果总时刻少于 12，则全部参与。轨迹线和背景擦除仍然使用全部时刻，所以轨迹形状不会被截断。
+
+`--ghost-fade-exponent 2.0` 控制旧残影的透明度曲线：
+
+```text
+alpha = min_alpha + (1 - min_alpha) × tau^指数
+```
+
+- `tau` 是该时刻在整段序列中的位置，最早为 0，最新为 1；
+- 指数 `1`：线性渐隐，旧效果；
+- 指数 `2`：中间时刻明显更淡，轨迹更清楚；
+- 指数越大，旧残影消失越快。
+
+菜单里对应“残影密度”和“旧残影衰减”两题，选项说明直接描述对画面的影响。确认清单会显示最终采用的值。想恢复旧版全部 52 个残影加线性渐隐：
+
+```powershell
+uv run object-overlay "video.mp4" --ghost-keyframes 0 --ghost-fade-exponent 1
+```
 
 ### 跟踪采样与输出采样
 

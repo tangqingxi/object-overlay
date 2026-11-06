@@ -156,7 +156,7 @@ class WizardTest(unittest.TestCase):
     def test_题目顺序(self) -> None:
         # 先定产物（输出内容、输出目录、轨迹线样式），再定处理（抽帧、复核）。
         _, titles = self._run_with_answers(
-            [1, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0, 0],
             self._config(mode="both"),
         )
 
@@ -167,11 +167,46 @@ class WizardTest(unittest.TestCase):
                 "输出目录",
                 "轨迹线",
                 "轨迹线颜色",
+                "残影密度",
+                "旧残影衰减",
                 "抽帧间隔",
                 "是否逐帧复核识别结果",
                 "确认开始？",
             ],
         )
+
+    def test_可以选择残影密度和衰减(self) -> None:
+        result, _ = self._run_with_answers(
+            [1, 0, 0, 0, 1, 2, 0, 0, 0],
+            self._config(mode="ghost"),
+        )
+
+        assert result is not None
+        self.assertEqual(result.ghost_keyframes, 16)
+        self.assertEqual(result.ghost_fade_exponent, 2.5)
+
+    def test_确认清单显示残影参数(self) -> None:
+        config = self._config(
+            mode="ghost",
+            ghost_keyframes=16,
+            ghost_fade_exponent=2.5,
+        )
+
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            wizard._summarize(config)
+
+        text = output.getvalue()
+        self.assertIn("残影时刻    16 个（0=全部）", text)
+        self.assertIn("指数 2.5", text)
+        self.assertIn("越大旧影越淡", text)
+
+    def test_确认清单显示全部残影时刻(self) -> None:
+        config = self._config(mode="ghost", ghost_keyframes=0)
+
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            wizard._summarize(config)
+
+        self.assertIn("残影时刻    全部（0=全部）", output.getvalue())
 
     def test_确认清单显示动态SAM2运行参数(self) -> None:
         config = self._config(
@@ -186,7 +221,7 @@ class WizardTest(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("SAM 2.1 运行参数", text)
         self.assertIn("sam2.1_hiera_tiny", text)
-        self.assertIn("7.5 FPS", text)
+        self.assertIn("7.5 帧/秒", text)
         self.assertIn("custom.pt", text)
 
     def test_确认清单默认SAM2参数来自配置(self) -> None:
@@ -200,7 +235,7 @@ class WizardTest(unittest.TestCase):
 
         text = output.getvalue()
         self.assertIn("sam2.1_hiera_small", text)
-        self.assertIn("15 FPS", text)
+        self.assertIn("15 帧/秒", text)
         self.assertIn("checkpoints", text)
         self.assertIn("sam2.1_hiera_small.pt", text)
 
@@ -234,6 +269,8 @@ class WizardTest(unittest.TestCase):
 
         self.assertIn("轨迹线", titles)
         self.assertNotIn("轨迹线颜色", titles)
+        self.assertIn("残影密度", titles)
+        self.assertIn("旧残影衰减", titles)
 
     def test_可以把描边关掉(self) -> None:
         result, _ = self._run_with_answers(

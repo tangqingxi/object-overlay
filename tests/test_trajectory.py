@@ -5,7 +5,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from object_overlay.compose import compose_ghost_overlay
+from object_overlay.compose import (
+    _select_ghost_positions,
+    compose_ghost_overlay,
+)
 from object_overlay.trajectory import (
     draw_trajectory,
     format_hex_color,
@@ -448,6 +451,62 @@ class GhostOverlayTest(unittest.TestCase):
             assert ghost is not None
             self.assertEqual(ghost.dtype, np.uint16)
             np.testing.assert_array_equal(ghost[8, 8], frames[2][8, 8])
+
+
+class GhostKeyframesTest(unittest.TestCase):
+    def test_关键帧位置均匀且包含首尾(self) -> None:
+        positions = _select_ghost_positions(52, 12)
+
+        self.assertEqual(len(positions), 12)
+        self.assertEqual(positions[0], 0)
+        self.assertEqual(positions[-1], 51)
+        self.assertEqual(positions, sorted(set(positions)))
+
+    def test_关键帧为0或超过总帧数时保留全部(self) -> None:
+        self.assertEqual(_select_ghost_positions(5, 0), [0, 1, 2, 3, 4])
+        self.assertEqual(_select_ghost_positions(5, 12), [0, 1, 2, 3, 4])
+
+    def test_只盖章关键帧时非关键帧保持背景(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            count = 20
+            frames = [
+                np.zeros((80, 80, 3), dtype=np.uint8)
+                for _ in range(count)
+            ]
+            masks = [
+                np.zeros((80, 80), dtype=np.uint8)
+                for _ in range(count)
+            ]
+            frame_paths = []
+
+            for index in range(count):
+                x = 5 + index * 3
+                frames[index][40:42, x : x + 2] = 200
+                masks[index][40:42, x : x + 2] = 255
+                path = root / f"frame_{index:04d}.png"
+                write_image(path, frames[index])
+                frame_paths.append(path)
+
+            ghost = read_image(
+                compose_ghost_overlay(
+                    frame_paths,
+                    masks,
+                    base_index=0,
+                    output_dir=root,
+                    min_alpha=0.2,
+                    show_trajectory=False,
+                    keyframes=5,
+                    fade_exponent=2.0,
+                ),
+                cv2.IMREAD_UNCHANGED,
+            )
+
+            assert ghost is not None
+            # 关键帧为 0、5、10、14、19。第 1 帧不是关键帧，应保持背景。
+            self.assertEqual(int(ghost[40, 8, 0]), 0)
+            # 最后一个关键帧完全不透明，保留原始像素。
+            self.assertEqual(int(ghost[40, 62, 0]), 200)
 
 
 if __name__ == "__main__":

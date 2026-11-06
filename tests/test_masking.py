@@ -23,16 +23,19 @@ class SelectTargetRoiTest(unittest.TestCase):
         with (
             patch("cv2.selectROI", return_value=(10, 10, 20, 20)),
             patch("cv2.destroyWindow"),
-            patch("cv2.putText", side_effect=capture_text),
+            patch(
+                "object_overlay.masking.draw_text",
+                side_effect=capture_text,
+            ),
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             roi = _select_target_roi(image, 1)
 
         self.assertEqual(roi, (10, 10, 20, 20))
         self.assertTrue(
-            any("Drag a box around the target" in text for text in texts)
+            any("用鼠标框住目标" in text for text in texts)
         )
-        self.assertTrue(any("confirm" in text for text in texts))
+        self.assertTrue(any("确认" in text for text in texts))
 
 
 if __name__ == "__main__":
