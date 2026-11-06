@@ -87,7 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
     targets.add_argument(
         "--force",
         action="store_true",
-        help="忽略已有缓存，重新生成全部 Mask",
+        help=(
+            "忽略自动 Mask 缓存并重新生成；"
+            "SAM 2.1 人工锚点会保留"
+        ),
     )
     targets.add_argument(
         "--select",
@@ -102,10 +105,10 @@ def build_parser() -> argparse.ArgumentParser:
     tracking.add_argument(
         "--tracker",
         choices=TRACKERS,
-        default="motion",
+        default="sam2",
         help=(
-            "目标 Mask 后端：motion=原有背景差分，"
-            "sam2=SAM 2.1 视频跟踪，默认 motion"
+            "目标 Mask 后端：sam2=SAM 2.1 视频跟踪（默认），"
+            "motion=保留的背景差分后备"
         ),
     )
     tracking.add_argument(

@@ -45,6 +45,12 @@ class ResolveConfigTest(unittest.TestCase):
     def test_默认生成两种叠加图(self) -> None:
         self.assertEqual(RunConfig(video_path=Path("clip.mp4")).mode, "both")
 
+    def test_SAM分支默认使用SAM2跟踪(self) -> None:
+        self.assertEqual(
+            RunConfig(video_path=Path("clip.mp4")).tracker,
+            "sam2",
+        )
+
     def test_接受全部合法模式(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
             video = self._video(Path(temporary_dir))
@@ -118,6 +124,7 @@ class BackgroundSelectionPipelineTest(unittest.TestCase):
                 video_path=Path("clip.mp4"),
                 mode=mode,
                 select=select,
+                tracker="motion",
                 base_frame=1,
                 output_dir=output_dir,
             )

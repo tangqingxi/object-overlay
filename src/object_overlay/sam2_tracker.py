@@ -172,6 +172,7 @@ class Sam2Tracker:
         self.anchor_masks: dict[int, np.ndarray] = {}
         self.initial_mask: np.ndarray | None = None
         self.background_mask: np.ndarray | None = None
+        self.background_manual = False
         self._predictor: Any | None = None
         self._state: dict[str, Any] | None = None
         self._torch: Any | None = None
@@ -207,6 +208,7 @@ class Sam2Tracker:
             and self.anchor_masks
             and self._load_cached_masks()
         ):
+            self._override_anchors()
             self._set_background_mask()
             print("复用 SAM 2.1 跟踪缓存与人工锚点。")
             return
@@ -230,7 +232,7 @@ class Sam2Tracker:
             correct=self.correct,
             restore=self.restore,
             keeps_base_mask=True,
-            background_manual=self.base_index in self.anchor_masks,
+            background_manual=self.background_manual,
             manual_dir=self.manual_dir,
             background_mask_path=self._manual_path(self.base_index),
         )
@@ -245,6 +247,14 @@ class Sam2Tracker:
         self._add_mask_anchor(frame_index, mask)
         self.anchor_masks[frame_index] = mask.copy()
         self.masks[frame_index] = mask.copy()
+
+        if (
+            frame_index == self.base_index
+            and self.initial_mask is not None
+            and not np.array_equal(mask, self.initial_mask)
+        ):
+            self.background_manual = True
+
         self._propagate_after_change(frame_index)
         self._set_background_mask()
         self._save_cache()
@@ -268,12 +278,14 @@ class Sam2Tracker:
                 return [item.copy() for item in self.masks]
 
             if np.array_equal(self.anchor_masks[frame_index], self.initial_mask):
+                self.background_manual = False
                 return [item.copy() for item in self.masks]
 
             self._clear_anchor_prompt(frame_index)
             self._add_mask_anchor(self.base_index, self.initial_mask)
             self.anchor_masks[self.base_index] = self.initial_mask.copy()
             self.masks[self.base_index] = self.initial_mask.copy()
+            self.background_manual = False
             self._run_propagation(
                 self._track_index(self.base_index),
                 forward=True,
@@ -352,36 +364,42 @@ class Sam2Tracker:
             shutil.rmtree(self.track_dir)
 
         self.track_dir.mkdir(parents=True, exist_ok=True)
-        ffmpeg = find_ffmpeg()
-        scale_filter = (
-            f"fps={self.track_fps:g},"
-            f"scale=w='min({self.max_side},iw)':h=-2"
-        )
-        command = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(self.video_path),
-            "-vf",
-            scale_filter,
-            "-q:v",
-            "2",
-            "-start_number",
-            "0",
-            str(self.track_dir / "%05d.jpg"),
-        ]
 
         try:
             import subprocess
 
+            ffmpeg = find_ffmpeg()
+            scale_filter = (
+                f"fps={self.track_fps:g},"
+                f"scale=w='min({self.max_side},iw)':h=-2"
+            )
+            command = [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(self.video_path),
+                "-vf",
+                scale_filter,
+                "-q:v",
+                "2",
+                "-start_number",
+                "0",
+                str(self.track_dir / "%05d.jpg"),
+            ]
             subprocess.run(command, check=True)
         except Exception as exc:
-            raise RuntimeError(
-                f"SAM 2.1 跟踪帧抽取失败：{exc}"
-            ) from exc
+            print(
+                "FFmpeg 抽取 SAM 2.1 跟踪帧失败，"
+                f"改用 OpenCV 顺序解码：{exc}"
+            )
+            if self.track_dir.exists():
+                shutil.rmtree(self.track_dir)
+
+            self.track_dir.mkdir(parents=True, exist_ok=True)
+            self._extract_tracking_frames_with_opencv()
 
         frame_paths = sorted(
             self.track_dir.glob("*.jpg"),
@@ -415,6 +433,61 @@ class Sam2Tracker:
             encoding="utf-8",
         )
         self._track_frames_ready = True
+
+    def _extract_tracking_frames_with_opencv(self) -> None:
+        """FFmpeg 不可写/不可用时的顺序解码后备路径。"""
+        capture = cv2.VideoCapture(str(self.video_path))
+
+        if not capture.isOpened():
+            raise RuntimeError(f"无法打开视频：{self.video_path}")
+
+        source_fps = float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
+
+        if source_fps <= 0:
+            source_fps = 30.0
+
+        target_index = 0
+        written = 0
+        source_index = 0
+
+        try:
+            while True:
+                ok, frame = capture.read()
+
+                if not ok:
+                    break
+
+                while (
+                    target_index / self.track_fps
+                    <= source_index / source_fps + 1e-9
+                ):
+                    height, width = frame.shape[:2]
+                    scale = min(1.0, self.max_side / max(width, height))
+
+                    if scale < 1.0:
+                        resized = cv2.resize(
+                            frame,
+                            (max(1, int(width * scale)),
+                             max(1, int(height * scale))),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                    else:
+                        resized = frame
+
+                    write_image(
+                        self.track_dir / f"{written:05d}.jpg",
+                        resized,
+                        [cv2.IMWRITE_JPEG_QUALITY, 92],
+                    )
+                    written += 1
+                    target_index += 1
+
+                source_index += 1
+        finally:
+            capture.release()
+
+        if written == 0:
+            raise RuntimeError("OpenCV 未能抽取任何 SAM 2.1 跟踪帧。")
 
     def _read_tracking_meta(self) -> dict[str, Any] | None:
         if not self.track_meta_path.exists():
@@ -479,8 +552,9 @@ class Sam2Tracker:
                 vos_optimized=False,
             )
             # 人工修正必须成为 conditioning frame，才能影响后续传播。
+            # 不启用 clear_non_cond_mem_around_input：当前官方版本在
+            # preflight 中调用了不存在的 per-object 清理方法。
             predictor.add_all_frames_to_correct_as_cond = True
-            predictor.clear_non_cond_mem_around_input = True
             self._torch = torch
             self._device = torch.device("cuda")
 
@@ -854,6 +928,9 @@ class Sam2Tracker:
 
         self.anchor_masks = loaded
         self.initial_mask = loaded[self.base_index].copy()
+        self.background_manual = bool(
+            data.get("background_manual", False)
+        )
         return True
 
     def _load_cached_masks(self) -> bool:
@@ -890,6 +967,21 @@ class Sam2Tracker:
         self._cache_loaded = True
         return True
 
+    def _frame_files_identity(self) -> list[dict[str, object]]:
+        identity: list[dict[str, object]] = []
+
+        for path in self.frame_files:
+            stat = path.stat()
+            identity.append(
+                {
+                    "name": path.name,
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                }
+            )
+
+        return identity
+
     def _manifest_matches(self, manifest: dict[str, Any]) -> bool:
         if manifest.get("version") != CACHE_VERSION:
             return False
@@ -901,6 +993,9 @@ class Sam2Tracker:
             return False
 
         if manifest.get("frames") != len(self.images):
+            return False
+
+        if manifest.get("frame_files") != self._frame_files_identity():
             return False
 
         if abs(
@@ -917,6 +1012,9 @@ class Sam2Tracker:
         if manifest.get("stride") != self.stride:
             return False
 
+        if manifest.get("max_side") != self.max_side:
+            return False
+
         if abs(
             float(manifest.get("track_fps", -1.0)) - self.track_fps
         ) > 1e-9:
@@ -929,12 +1027,13 @@ class Sam2Tracker:
 
         current_checkpoint = _checkpoint_identity(self.checkpoint)
 
-        if (
-            "size" in checkpoint
-            and "size" in current_checkpoint
-            and checkpoint["size"] != current_checkpoint["size"]
-        ):
-            return False
+        for key in ("size", "mtime_ns"):
+            if (
+                key in checkpoint
+                and key in current_checkpoint
+                and checkpoint[key] != current_checkpoint[key]
+            ):
+                return False
 
         anchors = {
             str(frame_index): _sha1_file(self._manual_path(frame_index))
@@ -969,6 +1068,7 @@ class Sam2Tracker:
                 {
                     "init_frame": self.base_index,
                     "frames": sorted(self.anchor_masks),
+                    "background_manual": self.background_manual,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -982,11 +1082,13 @@ class Sam2Tracker:
                     "tracker": "sam2",
                     "video": _video_identity(self.video_path),
                     "frames": len(self.images),
+                    "frame_files": self._frame_files_identity(),
                     "interval": self.interval,
                     "model": self.model_name,
                     "checkpoint": _checkpoint_identity(self.checkpoint),
                     "init_frame": self.base_index,
                     "stride": self.stride,
+                    "max_side": self.max_side,
                     "track_fps": self.track_fps,
                     "tracking_size": [
                         self.track_width,

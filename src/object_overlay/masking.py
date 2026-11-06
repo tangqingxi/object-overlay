@@ -1084,6 +1084,8 @@ def select_motion_masks(
 
         return cumulative, included_count
 
+    background_mask: np.ndarray | None = None
+
     def apply_tracker_masks(updated_masks: list[np.ndarray]) -> None:
         if len(updated_masks) != len(working_masks):
             raise RuntimeError("跟踪器返回的 Mask 数量与抽帧数量不一致。")
@@ -1095,7 +1097,7 @@ def select_motion_masks(
         frame_index: int,
         mask: np.ndarray,
     ) -> np.ndarray:
-        nonlocal background_auto_mask
+        nonlocal background_auto_mask, background_mask
 
         working_masks[frame_index] = mask.copy()
 
@@ -1108,10 +1110,13 @@ def select_motion_masks(
         if tracking.keeps_base_mask:
             background_auto_mask = working_masks[base_index].copy()
 
+            if background_mask is not None:
+                background_mask = working_masks[base_index].copy()
+
         return working_masks[frame_index].copy()
 
     def restore_frame(frame_index: int) -> np.ndarray:
-        nonlocal background_auto_mask
+        nonlocal background_auto_mask, background_mask
 
         if tracking.restore is not None:
             apply_tracker_masks(tracking.restore(frame_index))
@@ -1127,9 +1132,11 @@ def select_motion_masks(
         if tracking.keeps_base_mask:
             background_auto_mask = working_masks[base_index].copy()
 
+            if background_mask is not None:
+                background_mask = working_masks[base_index].copy()
+
         return working_masks[frame_index].copy()
 
-    background_mask: np.ndarray | None = None
     review_background = background_auto_mask is not None
     cursor = 0
     cumulative, included_count = build_cumulative(cursor)

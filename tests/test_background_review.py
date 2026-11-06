@@ -12,6 +12,7 @@ from object_overlay.masking import (
     BACKGROUND_CACHE_STATE_NAME,
     BACKGROUND_SOURCE_MANUAL,
     BACKGROUND_SOURCE_SKIPPED,
+    TrackingHooks,
     _save_background_selection,
     select_motion_masks,
 )
@@ -396,6 +397,157 @@ class BackgroundReviewTest(unittest.TestCase):
                 any(text.startswith("BASE FRAME") for text in texts)
             )
             self.assertTrue(texts[0].startswith("frame_0002"))
+
+
+class Sam2SelectionHooksTest(unittest.TestCase):
+    def _run(
+        self,
+        keys: list[int],
+        *,
+        masks: list[np.ndarray] | None = None,
+        restore_masks: list[np.ndarray] | None = None,
+        manual_indices: set[int] | None = None,
+        edit_mask: np.ndarray | None = None,
+        corrected_dir: Path,
+    ):
+        images = _make_images(3)
+        masks = _make_masks(3) if masks is None else masks
+        restore_masks = (
+            _make_masks(3) if restore_masks is None else restore_masks
+        )
+        auto_background = np.zeros((SIZE, SIZE), dtype=np.uint8)
+        auto_background[10:18, 10:18] = 255
+        manual_dir = corrected_dir / "manual"
+        hook_masks = [mask.copy() for mask in masks]
+        correct_calls: list[tuple[int, np.ndarray]] = []
+        restore_calls: list[int] = []
+
+        def correct(frame_index: int, mask: np.ndarray) -> list[np.ndarray]:
+            correct_calls.append((frame_index, mask.copy()))
+            hook_masks[frame_index] = mask.copy()
+
+            for index in range(frame_index + 1, len(hook_masks)):
+                hook_masks[index] = mask.copy()
+
+            return [item.copy() for item in hook_masks]
+
+        def restore(frame_index: int) -> list[np.ndarray]:
+            restore_calls.append(frame_index)
+
+            for index in range(frame_index, len(hook_masks)):
+                hook_masks[index] = restore_masks[index].copy()
+
+            return [item.copy() for item in hook_masks]
+
+        tracking = TrackingHooks(
+            name="sam2",
+            manual_indices=manual_indices or set(),
+            correct=correct,
+            restore=restore,
+            keeps_base_mask=True,
+            manual_dir=manual_dir,
+            background_mask_path=manual_dir / "frame_0001.png",
+        )
+        previews: list[np.ndarray] = []
+        texts: list[str] = []
+
+        with (
+            patch("cv2.namedWindow"),
+            patch(
+                "cv2.imshow",
+                side_effect=lambda _name, image: previews.append(
+                    image.copy()
+                ),
+            ),
+            patch("cv2.waitKey", side_effect=keys),
+            patch("cv2.destroyWindow"),
+            patch(
+                "cv2.putText",
+                side_effect=lambda _image, text, *_args, **_kwargs: (
+                    texts.append(text)
+                ),
+            ),
+            patch(
+                "object_overlay.masking._edit_manual_frame",
+                return_value=edit_mask,
+            ) as edit_manual,
+        ):
+            result = select_motion_masks(
+                images,
+                masks,
+                corrected_dir,
+                base_index=0,
+                interval=0.5,
+                background_auto_mask=auto_background,
+                tracking=tracking,
+            )
+
+        return result, correct_calls, restore_calls, edit_manual, texts
+
+    def test_背景帧按M会调用跟踪器修正并更新下游(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            corrected_dir = Path(temporary_dir) / "masks_corrected"
+            manual = np.zeros((SIZE, SIZE), dtype=np.uint8)
+            manual[35:45, 35:45] = 255
+
+            result, correct_calls, _restore, edit_manual, texts = self._run(
+                [ord("m"), 13, 13, 13, 13],
+                edit_mask=manual,
+                corrected_dir=corrected_dir,
+            )
+
+            edit_manual.assert_called_once()
+            self.assertTrue(
+                any("Mask: MANUAL" in text for text in texts)
+            )
+            self.assertEqual(len(correct_calls), 1)
+            self.assertEqual(correct_calls[0][0], 0)
+            np.testing.assert_array_equal(result.background_mask, manual)
+            np.testing.assert_array_equal(result.selected_masks[1], manual)
+            self.assertEqual(
+                cv2.countNonZero(result.selected_masks[0]),
+                0,
+            )
+
+    def test_候选帧按M会调用跟踪器修正下游(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            corrected_dir = Path(temporary_dir) / "masks_corrected"
+            manual = np.zeros((SIZE, SIZE), dtype=np.uint8)
+            manual[50:60, 50:60] = 255
+
+            result, correct_calls, _restore, _edit, _texts = self._run(
+                [13, ord("m"), 13, 13, 13],
+                edit_mask=manual,
+                corrected_dir=corrected_dir,
+            )
+
+            self.assertEqual(len(correct_calls), 1)
+            self.assertEqual(correct_calls[0][0], 1)
+            np.testing.assert_array_equal(result.selected_masks[1], manual)
+            np.testing.assert_array_equal(result.selected_masks[2], manual)
+            self.assertIsNotNone(result.background_mask)
+
+    def test_候选帧按R会调用跟踪器恢复并重传播(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            corrected_dir = Path(temporary_dir) / "masks_corrected"
+            masks = _make_masks(3)
+            manual = np.zeros((SIZE, SIZE), dtype=np.uint8)
+            manual[50:60, 50:60] = 255
+            masks[1] = manual.copy()
+
+            result, _correct, restore_calls, _edit, _texts = self._run(
+                [13, ord("r"), 13, 13, 13],
+                masks=masks,
+                restore_masks=_make_masks(3),
+                manual_indices={1},
+                corrected_dir=corrected_dir,
+            )
+
+            self.assertEqual(restore_calls, [1])
+            np.testing.assert_array_equal(
+                result.selected_masks[1],
+                _make_masks(3)[1],
+            )
 
 
 if __name__ == "__main__":

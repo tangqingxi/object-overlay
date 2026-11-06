@@ -57,7 +57,7 @@ class RunConfig:
     output_dir: Path | None = None
     force: bool = False
     select: bool = False
-    tracker: str = "motion"
+    tracker: str = "sam2"
     sam2_model: str = DEFAULT_SAM2_MODEL
     sam2_checkpoint: Path | None = None
     sam2_track_fps: float = DEFAULT_SAM2_TRACK_FPS

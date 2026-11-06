@@ -1,197 +1,301 @@
-# Object Overlay
+# Object Overlay — SAM 2.1 AI 版
 
-从视频中提取同一对象在不同时刻的位置，并合成为一张叠加图。工具不限定对象类别；仓库中的无人机只是一个使用样例。
+从视频中提取同一目标在不同时刻的位置，并合成为一张叠加图。本仓库用两个长期分支维护两个版本：
+
+| 分支 | 版本 | 目标算法 | Python 依赖 |
+| --- | --- | --- | --- |
+| `main` | Light 原版 | OpenCV 背景差分 + GrabCut | 轻量，不需要 PyTorch |
+| `SAM` | SAM 2.1 AI 版 | SAM 2.1 视频分割与跟踪 | PyTorch CUDA + SAM 2.1 |
+
+`SAM` 分支保留原有的 OpenCV GUI、Mask 编辑器和图像合成模块，但目标 Mask 由 SAM 2.1 生成并通过视频时序传播。两个分支不自动合并；Light 用户继续使用 `main`。
 
 ![无人机多时刻叠加效果](./photo.jpg)
 
-## 安装与部署
+## 两个版本
 
-uv 支持 Windows、Linux 和 macOS。项目的使用方式相同，只有 uv 的安装命令因系统而异。
-
-### Windows
+### Light 原版（`main`）
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+cd C:\Users\32450\Desktop\ulog\object-overlay   # main worktree
+uv sync
+uv run object-overlay "path\to\video.mp4" --select
 ```
 
-也可以使用 Windows 包管理器：
+Light 版不安装 PyTorch，也不加载 SAM 2.1；原有背景差分、GrabCut、`overlay` 与 `ghost` 行为保持不变。
+
+### SAM 2.1 AI 版（本分支 `SAM`）
 
 ```powershell
-winget install --id=astral-sh.uv -e
+cd C:\Users\32450\Desktop\ulog\object-overlay-SAM   # SAM worktree
+uv sync
+uv run object-overlay "path\to\video.mp4" --interval 0.3 --select --mode both
 ```
 
-### Linux
+SAM 版默认使用 SAM 2.1 Small。首次运行会在背景帧上要求鼠标框选目标，之后由 SAM 2.1 在视频时序中传播同一目标。逐帧复核时按 `M` 修正 Mask，修正会作为新的跟踪条件重新注入 SAM 2.1，并重新计算后续帧。
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
+## Windows 11 原生安装
 
-### macOS
+### 1. 准备环境
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
+- Windows 11 原生环境（不使用 WSL、Ubuntu 或 Docker）。
+- NVIDIA 驱动可被 `nvidia-smi` 识别。
+- [uv](https://docs.astral.sh/uv/) 已安装。
+- Python 3.12（由 uv 按 `.python-version` 管理）。
 
-安装完成后，进入项目目录并同步环境：
+推荐用 `git worktree` 给两个版本各建一个工作目录，避免共享 `.venv`：
 
-```console
+```powershell
+cd C:\Users\32450\Desktop\ulog\object-overlay
+git fetch origin
+git worktree add ..\object-overlay-SAM SAM
+cd ..\object-overlay-SAM
 uv sync
 ```
 
-`uv` 会根据 `.python-version` 和 `uv.lock` 管理 Python、虚拟环境及项目依赖，不需要手动创建或激活虚拟环境。程序优先使用系统 FFmpeg；未安装时会使用项目依赖提供的 FFmpeg。其他安装方式见 [uv 官方安装文档](https://docs.astral.sh/uv/getting-started/installation/)。
+如果工作目录已经存在，直接进入该目录执行 `uv sync` 即可。每个 worktree 有独立的 `.venv`、`pyproject.toml` 和 `uv.lock`；模型权重和推理缓存都不提交到 Git。
+
+### 2. PyTorch CUDA
+
+`pyproject.toml` 已把 PyTorch 固定在 CUDA 12.8 构建上：
+
+- `torch==2.11.0`（`cu128`）
+- `torchvision==0.26.0`（`cu128`）
+- 索引：`https://download.pytorch.org/whl/cu128`
+
+CUDA 12.8 构建包含 RTX 50 系列（Blackwell，`sm_120`）所需的计算能力。安装后先确认不是只“`torch.cuda.is_available()` 为 True”，而是真的能算：
+
+```powershell
+uv run python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_capability(0)); x=torch.randn(1024,1024,device='cuda'); y=x@x; torch.cuda.synchronize(); print(float(y.sum()))"
+```
+
+最后一行必须输出一个有限数值；如果报 CUDA 错误，按下面的[兼容性问题](#cuda--windows-兼容问题)排查。
+
+### 3. 安装 SAM 2.1
+
+`uv sync` 会安装官方 `facebookresearch/sam2` 代码。Windows 上不需要自定义 CUDA 扩展，建议第一次安装前就设置：
+
+```powershell
+$env:SAM2_BUILD_CUDA="0"
+uv sync
+```
+
+这只跳过 SAM 2 的可选 C++/CUDA 后处理扩展，不影响 PyTorch 的 GPU 推理。本项目不依赖 `decord` 或 WSL；跟踪帧由 FFmpeg 抽成 JPEG 后交给官方 `SAM2VideoPredictor`，FFmpeg 不可用时自动退回 OpenCV 顺序解码。
+
+首次 `uv sync` 需要下载约 2.6GB 的 CUDA PyTorch wheel，并可能在隔离构建环境里额外下载构建期依赖；这是正常的首次安装开销。`uv.lock` 已锁定版本，后续同步会复用缓存。
+
+### 4. 下载 SAM 2.1 Small 权重
+
+权重不提交到仓库，放在 worktree 的 `checkpoints\` 下（已在 `.gitignore` 中忽略）：
+
+```powershell
+New-Item -ItemType Directory -Force checkpoints
+curl.exe -L -o checkpoints\sam2.1_hiera_small.pt `
+  https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
+```
+
+也可以把权重放在任意位置，通过 `--sam2-checkpoint` 或 `SAM2_CHECKPOINT` 环境变量指定。
 
 ## 使用
 
-把自己的视频放在任意位置，然后运行：
+### 基本命令
 
-```console
-uv run object-overlay "path/to/input.mp4"
+```powershell
+uv run object-overlay ".\examples\drone\input\drone_1.mp4" `
+  --interval 0.3 --mode both --select
 ```
 
-会先弹出一份设置菜单，用方向键选、Enter 确认，确认后才开始处理：
+SAM 版默认 `--tracker sam2`。`--tracker motion` 仍保留为后备，但 AI 版通常不需要。
 
-```text
-? 要生成哪种叠加图
-> overlay   只出无损叠加图
-  ghost     只出残影版
-  both      两个都出
-```
+### 首次指定目标
 
-菜单按键：
+1. 程序先显示 `--base-frame` 指定的背景帧，例如默认 `frame_0001`。
+2. 在完整画面上用鼠标框住无人机，按 Enter。
+3. SAM 2.1 生成初始 Mask，并显示绿色分割预览。
+4. 按 Enter 接受；按 `M` 用现有编辑器修正；按 `R` 重新框选；按 `Q/Esc` 取消。
+5. 接受后 SAM 2.1 从该帧向前传播；如果背景帧不是第一帧，也会向视频开头反向传播。
+
+初始化帧和图像合成背景帧在代码中分开管理：初始化帧决定跟踪起点，背景帧只决定 `ghost` 用哪一帧作画布。
+
+### 逐帧复核
+
+背景帧先复核，再进入普通候选帧。两套界面都保留原有习惯：
 
 | 按键 | 功能 |
 | --- | --- |
-| ↑ / ↓ | 上下移动选项 |
-| Enter 或 → | 确认当前选项，进入下一题 |
-| ← 或 Esc | 返回上一题；在第一题时取消整个流程 |
+| Enter / Space | 接受当前背景 Mask / 纳入当前候选时刻 |
+| `S` | 跳过输出；**不会**从 SAM 2.1 跟踪记忆中删除目标 |
+| `M` | 手动框选并修正 Mask，然后注入跟踪器并重传播 |
+| `R` | 恢复当前帧的自动预测；人工锚点会从跟踪状态中移除 |
+| `B` / Backspace | 回退上一候选；在首个候选帧按 `B` 返回背景帧 |
+| `Q` / Esc | 取消本次筛选 |
 
-依次会问：**要生成哪种叠加图 → 输出目录 → 轨迹线样式 → 轨迹线颜色 → 抽帧间隔 → 是否逐帧复核识别结果**。先定产物、再定处理。
+按 `M` 后先复用现有 OpenCV ROI、GrabCut 和画笔编辑器，得到用户确认的 Mask。该 Mask 会：
 
-只问当前设置下用得上的问题——比如输出内容选了 `overlay`，后两题里的轨迹线部分就不会出现。
+1. 写入 `masks_sam2/manual/` 作为人工锚点；
+2. 通过官方 `add_new_mask()` 注入 `SAM2VideoPredictor` 的 inference state；
+3. 让该帧成为 conditioning frame；
+4. 从该帧向后重新调用 `propagate_in_video()`；
+5. 如果修正帧早于初始化帧，还会先反向重传播到视频开头。
 
-适合自动识别的素材应当使用固定或基本固定的镜头，并且画面中有一个主要运动对象。`--interval` 越小，提供的候选位置越密。
+因此第 16 帧及之后的 Mask 会使用新的跟踪条件，而不是只替换当前帧 PNG。`S` 仅表示“不把该时刻放进最终叠加图”，跟踪状态仍然保留。
 
-自动识别有时会把不是目标的东西也抠进来，或者 Mask 切不准。最后一题选"是"（等价于加 `--select`）后会逐帧弹出复核窗口：
+### 输出模式
 
-| 按键 | 功能 |
-| --- | --- |
-| Enter 或空格 | 纳入当前对象 |
-| `S` | 跳过当前对象 |
-| `B` 或 Backspace | 回退上一帧并重新选择 |
-| `M` | 自动 Mask 不准确时，手动框选并修正 |
-| `R` | 放弃当前人工修正，恢复自动 Mask |
-| `Q` 或 Esc | 取消本次选择 |
-
-当前候选对象显示为绿色；已经纳入的对象会以原始颜色留在后续预览中。全部候选处理完毕后，按 Enter 或空格生成结果。
-
-#### 背景帧复核
-
-输出模式为 `ghost` 或 `both` 时，复核会先停在 `--base-frame` 指定的背景帧，画面左上角标有 `BASE FRAME`。例如 `--base-frame 1` 首先显示 `frame_0001`，`--base-frame 10` 首先显示 `frame_0010`。背景帧的自动 Mask 同样用绿色高亮，确认后再进入普通候选帧：
-
-| 按键 | 功能 |
-| --- | --- |
-| Enter 或空格 | 接受当前背景 Mask |
-| `M` | 手动重新框选并修正背景 Mask |
-| `R` | 恢复背景帧的自动检测 Mask |
-| `S` | 跳过背景目标：不擦除、不纳入残影序列 |
-| `Q` 或 Esc | 取消本次选择 |
-
-`M` 直接复用普通候选帧的框选、GrabCut 分割和画笔修正流程。背景帧不会重复出现在普通候选列表里；在首个普通候选帧按 `B` 可以回到背景帧重新修改。`overlay` 模式不进行背景帧复核，`both` 模式下背景 Mask 只影响 ghost 合成。
-
-背景帧的人工 Mask 和跳过状态保存在输出目录的 `masks_corrected/background_mask.png` 与 `masks_corrected/background.json`，后续 `--select` 运行会复用；`--force` 会忽略这些缓存，按 `R` 也会删除人工缓存并恢复自动检测。跳过状态由 `background.json` 明确记录，不会和"自动检测失败返回空 Mask"混淆。
-
-### 只用参数
-
-**命令行参数和菜单是叠加的，不是二选一**：参数先填进去当初始值，菜单在这上面改。喜欢直接用参数的开发者可以加 `-y`（或 `--yes`）跳过菜单：
-
-```console
-uv run object-overlay "path/to/input.mp4" --interval 1.0 --mode ghost \
-  --trajectory-color "#00FF00" --select -y --output-dir "path/to/input_overlay"
-```
-
-在脚本、重定向、CI 这类没有终端的环境里，菜单会自动跳过，直接按参数跑，不加 `-y` 也不会卡住。
-
-叠加图有两种，用 `--mode` 选择生成哪一种：`overlay` 只出无损版，`ghost` 只出残影版，`both` 两个都出（默认）。
-
-- `overlay.png`：无损版本。Mask 内的像素直接从对应时刻的原帧复制，不做缩放和混合；Mask 之外的背景与背景帧逐像素相同。
-- `overlay_ghost.png`：残影版本。各时刻按时间混合，越早越淡、越细，最新时刻最实、最粗，并用一条样条曲线把各时刻的位置连起来，用来表达"同一对象在时间上的多次曝光"而不是"多个对象"。
-
-残影版的四个参数见下面的[参数表](#参数)。其中 `--no-trajectory` 只去掉那条线，渐隐和背景帧目标的擦除都保留。
-
-轨迹线默认带一条深色描边：浅色线条在浅色天空上会融掉，描边保证任何背景下都读得出来。代价是浅色背景上会多出一道深边，不喜欢就用 `--no-trajectory-outline` 去掉。
-
-```console
-uv run object-overlay "path/to/input.mp4" --mode ghost --no-trajectory -y --output-dir "path/to/input_overlay"
-```
-
-背景帧（`--base-frame`）通常被直接当作画布，但它里面往往也有目标。残影版会先把背景帧里的目标用其余时刻在同一区域的**时域中值**擦掉，再把它当作序列中的**第一个时刻**参与合成——否则它会以完整不透明留在画面里，成为唯一一个脱离轨迹线的目标。检测不到背景帧目标时会跳过这一步；无损版不受影响，仍然使用原始背景帧。
-
-启用 `--select` 时，残影版采用复核界面最终确认的背景 Mask，人工修正优先于自动检测，确认后不会再重新检测覆盖它。背景帧目标按 `S` 跳过时，既不擦除也不纳入残影序列，背景保持原始内容；这和无损版始终使用原始背景帧的行为不冲突。
-
-抽帧、Mask 和元数据属于可复用的运行产物；每次执行 `--select` 都会重新选择要纳入的时刻。**是否做过人工筛选记在 `metadata.json` 的 `curated` 字段里**，不再体现在产物文件名上——产物身份由输出目录承担。
-
-残影版的轨迹是否规整，取决于各时刻在时间上是否均匀。如果跳过大量候选帧，相邻时刻的间隔会忽大忽小，轨迹的弯折也会随之变得不规则；与其用 `--interval 0.5` 再手动跳掉一半，不如直接用 `--interval 1.0` 之类的粗间隔控制密度。
+- `overlay`：无损版。背景帧像素不变；候选时刻的 Mask 内直接复制原帧像素。
+- `ghost`：残影版。背景帧目标先按用户确认的 Mask 擦除，再作为最早时刻参与渐隐和轨迹线。
+- `both`：两种都生成；背景 Mask 只影响 ghost，overlay 背景保持无损。
 
 ## 参数
-
-交互式菜单里能改的都对应一个命令行参数，两者取值完全一致。
 
 | 参数 | 取值 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `video` | 路径 | 必填 | 输入视频 |
-| `-y`, `--yes` | 开关 | 关 | 跳过交互式设置，直接按当前参数开始 |
+| `-y`, `--yes` | 开关 | 关 | 跳过交互式设置菜单 |
 | `--mode` | `overlay` `ghost` `both` | `both` | 生成哪种叠加图 |
-| `--interval` | 秒 | `0.5` | 抽帧时间间隔，决定候选位置的密度 |
-| `--base-frame` | 整数 | `1` | 作为固定背景的抽帧编号 |
-| `--output-dir` | 路径 | 见下方说明 | 结果目录 |
-| `--force` | 开关 | 关 | 忽略已有缓存（包括背景帧人工修正），重新生成全部 Mask |
-| `--select` | 开关 | 关 | 逐帧复核识别结果：先复核背景帧，再剔除认错的对象、修正不准的 Mask |
-| `--ghost-min-alpha` | `(0, 1]` | `0.15` | 残影版中最早时刻的不透明度下限 |
+| `--interval` | 秒 | `0.5` | 输出 Mask 的抽帧间隔 |
+| `--base-frame` | 整数 | `1` | 背景帧编号，也是默认的 SAM 2.1 初始化帧 |
+| `--output-dir` | 路径 | 见下方 | 结果目录 |
+| `--force` | 开关 | 关 | 忽略自动预测缓存并重新传播；人工锚点保留 |
+| `--select` | 开关 | 关 | 逐帧复核；SAM 版建议开启 |
+| `--tracker` | `sam2` `motion` | `sam2` | `motion` 是保留的轻量后备 |
+| `--sam2-model` | `sam2.1_hiera_small` 等 | `sam2.1_hiera_small` | SAM 2.1 模型类型 |
+| `--sam2-checkpoint` | 路径 | `checkpoints\<model>.pt` | 权重文件 |
+| `--sam2-track-fps` | 浮点 | `15` | 密集跟踪采样目标帧率；输出仍按 `--interval` |
+| `--sam2-init-box` | `x,y,w,h` | 无 | 跳过鼠标框选，直接生成初始 Mask；仍会显示预览供确认 |
+| `--ghost-min-alpha` | `(0, 1]` | `0.15` | 残影最早时刻不透明度 |
 | `--trajectory` / `--no-trajectory` | 开关 | 绘制 | 是否绘制轨迹线 |
-| `--trajectory-outline` / `--no-trajectory-outline` | 开关 | 加 | 轨迹线下方是否加一条深色描边 |
-| `--trajectory-color` | `#RRGGBB` | `#FFA500` | 轨迹线颜色，也接受 `#RGB` 简写 |
+| `--trajectory-outline` / `--no-trajectory-outline` | 开关 | 加 | 轨迹线深色描边 |
+| `--trajectory-color` | `#RRGGBB` | `#FFA500` | 轨迹线颜色 |
 
-```console
-uv run object-overlay --help
+### 跟踪采样与输出采样
+
+`--interval` 是最终候选 Mask 的间隔，不是 SAM 2.1 必须使用的时间间隔。SAM 版会按 `--sam2-track-fps` 抽取更密的跟踪帧，再把输出时刻映射到实际抽帧结果：
+
+```text
+原始视频 30 FPS
+    ↓  按 --sam2-track-fps（默认 15）密集抽帧
+SAM 2.1 时序传播
+    ↓  按 --interval 取输出候选
+overlay / ghost
 ```
 
-`--mode` 不是必给项，但一旦给了旧写法 `--mode motion` 会直接报错——那个取值在当前版本里没有含义。
+跟踪帧率会根据输出间隔取整到“每个输出帧恰好对应整数个跟踪帧”的密度，例如 `--interval 0.3`、目标 15 FPS 会使用 16.67 FPS。若视频很长，跟踪帧总数会限制在约 480 帧以控制显存/内存；需要更细的快速目标时可增大 `--sam2-track-fps`，但要同时关注显存。
 
-### 输出目录
+## 缓存与数据
 
-菜单第 2 题会问输出目录，两个选项：**默认**（选项里直接显示算出来的完整路径）或**自定义**（自己填一条）。命令行给了 `--output-dir` 就等价于预选"自定义"。
+输出目录中的 SAM 版产物：
 
-"默认"按下面的规则算：
-
-- 视频放在名为 `input` 的目录里（本仓库样例就是这种布局），输出到它的**兄弟目录 `output`** 下：`input/drone.mp4` → `output/drone_overlay/`
-- 其他情况放在**视频旁边**：`videos/drone.mp4` → `videos/drone_overlay/`
-
-目录名都带视频名，所以多个视频的输出堆在同一个 `output/` 里也不会互相覆盖。
-
-`examples/drone/input/` 和 `examples/drone/output/` 里各有一个 `.gitkeep` 占位。Git 不跟踪空目录，没有占位文件的话克隆下来这两个目录都不存在——有了它，把视频放进 `input/` 直接跑，结果就落在 `output/` 里。
-
-## 无人机样例
-
-本地将视频放入 `examples\drone\input\` 后，可运行：
-
-```console
-uv run object-overlay "./examples/drone/input/drone_1.mp4" --interval 1.0 --select -y --output-dir "./examples/drone/output/drone_1_selected"
+```text
+frames/                 # 输出抽帧
+sam2_frames/            # 密集跟踪 JPEG，可安全删除后重建
+masks_sam2/
+    auto/               # SAM 2.1 自动传播 Mask
+    manual/             # 用户确认的人工锚点
+    anchors.json        # 锚点帧号、初始化帧、背景是否人工修正
+    manifest.json       # 视频、模型、采样参数、Mask 哈希
+masks_corrected/        # 保留的 motion 人工 Mask 目录
+overlay.png
+overlay_ghost.png
 ```
 
-这里的 `-y` 是跳过设置菜单——`--select` 本身已经有一套筛选界面，不必连着交互两次。想要设置菜单就把它去掉。
+- `manifest.json` 会校验视频、抽帧数量/间隔、跟踪采样、模型名、权重路径/大小以及人工锚点哈希。任何一项变化都会让自动预测缓存失效。
+- `--force` 会让自动预测缓存失效并重新传播，但**不会删除人工锚点**；人工修正的结果仍然会被复用。
+- 人工锚点与自动预测分开存放，不能用空 Mask 推断“用户跳过”；跳过只是本次运行不把该时刻用于合成。
+- SAM 版和 motion 版的缓存文件名不同，不会互相覆盖。模型权重、`sam2_frames/`、`masks_sam2/` 不提交到 Git。
 
-样例的输入视频和中间产物已由 `.gitignore` 忽略，仓库只保留最终示例图。
+## CUDA / Windows 兼容问题
 
-查看所有参数：
+### `torch.cuda.is_available()` 为 False
 
-```console
-uv run object-overlay --help
+1. 先运行 `nvidia-smi`，确认驱动正常。
+2. 确认安装的是 `torch==2.11.0+cu128`，而不是 PyPI 默认的 CPU 版：
+   ```powershell
+   uv run python -c "import torch; print(torch.__version__); print(torch.version.cuda)"
+   ```
+3. RTX 50 系列需要 `sm_120`，CUDA 12.8 或更新的 PyTorch 构建；旧的 cu121/cu124 构建即使能 import torch，也可能在真实算子时报 “no kernel image is available”。
+4. 本项目已配置 `pytorch-cu128` 索引；不要在同一个 `.venv` 里先装 CPU torch 再装 CUDA torch。
+
+### 真实 GPU 运算验证
+
+只看到 `is_available()` 不够，必须执行一次矩阵运算：
+
+```powershell
+uv run python -c "import torch; x=torch.randn(2048,2048,device='cuda'); y=x@x; torch.cuda.synchronize(); print(torch.cuda.get_device_name(0), float(y.sum()))"
 ```
+
+### SAM 2 安装时扩展编译失败
+
+```powershell
+$env:SAM2_BUILD_CUDA="0"
+uv sync
+```
+
+本项目使用官方视频预测 API，不依赖自定义 CUDA 后处理扩展；该设置不影响 SAM 2.1 的 GPU 跟踪。不要因此改用 WSL。
+
+### 显存不足（OOM）
+
+- 默认使用 `sam2.1_hiera_small`，不要用 large。
+- 降低 `--sam2-track-fps`，例如从 15 降到 8。
+- 增大 `--interval` 减少输出帧，但注意跟踪采样仍由 `--sam2-track-fps` 控制。
+- 关闭其他占用 GPU 的程序；本项目已把跟踪帧和 inference state 尽量放在 CPU，只在计算时搬到 GPU。
+- 如果 8GB 显存仍然不够，优先使用更短的片段或更高 `--interval`，而不是静默改用 motion。
+
+### FFmpeg 与中文路径
+
+程序优先使用系统 FFmpeg；没有时使用 `imageio-ffmpeg` 自带的版本。跟踪帧抽取和输出目录都支持 Windows 中文路径。
+
+## 测试
+
+```powershell
+# 不加载模型的状态管理/缓存/UI 逻辑测试
+uv run python -m unittest discover -s tests -v
+
+# 真实 SAM 2.1 GPU 推理、人工修正重传播测试
+$env:RUN_SAM2_REAL="1"
+uv run python -m unittest tests.test_sam2_real -v
+```
+
+真实测试会自动生成一段合成视频并检查：模型加载、Mask 传播、修正锚点进入 conditioning state、后续帧被重新传播。没有 GPU 或权重时会跳过/报出明确原因，不会用 Mock 结果冒充真实推理。
+
+## 已知限制
+
+- SAM 2.1 是通用分割模型，不保证在所有无人机画面中都不漂移；漂移时请在复核界面按 `M` 修正，修正会重传播后续帧。
+- 目标短暂离开画面时可能得到空 Mask；不会强行用其他运动物体替代。
+- 背景帧只作为 ghost 的擦除对象；overlay 的背景像素始终不修改。
+- `--sam2-init-box` 只跳过鼠标框选，初始 Mask 预览仍需要窗口；完全无 GUI 的自动化可调用 `Sam2Tracker` 测试 API（见 `tests/test_sam2_real.py`）。
+
+## 实测记录
+
+本次验证机为 **RTX 5060 Laptop GPU（8GB，`sm_120`）**，不是任务描述里的 RTX 5070；两者同属 Blackwell 架构，CUDA 12.8 构建均适用。环境：
+
+```text
+Windows 11 build 26200
+Python 3.12.13
+torch 2.11.0+cu128
+CUDA runtime 12.8
+GPU capability (12, 0)
+SAM 2.1 Small 权重 184,416,285 bytes
+```
+
+真实模型验证结果（非 Mock）：
+
+- 真实 CUDA 矩阵乘法成功执行，`torch.cuda.is_available()` 为 True，`get_device_capability()` 为 `(12, 0)`。
+- 640×480 合成 3 秒视频，48 个跟踪帧、6 个输出帧：模型加载 + 初始化 + 首次传播约 **15–16 秒**，峰值显存约 **0.73 GiB**。
+- 同一视频在第 3 个输出帧注入人工 Mask 后，后续输出帧 3、4、5 均被重新传播并改变，证明人工修正影响后续帧，而不是只改当前 PNG。
+- 1280×720 真实无人机 3 秒片段（`drone_1_3s.mp4`）：48 个跟踪帧，首次跟踪约 **16 秒**；在输出帧 3 修正后，后续帧 3–5 重传播约 **13 秒**；生成 `overlay.png` 与 `overlay_ghost.png`，`ghost` 中背景帧无人机被正确擦除并形成轨迹。
+- 第二次运行直接复用 `masks_sam2/` 缓存与人工锚点，不再加载模型（除非继续按 `M` 修正）。
+
+以上是本次机器上的实测值，不代表所有显卡/视频都能达到该速度。SAM 2.1 的官方 CUDA 后处理扩展未编译（`_C` 缺失），官方会打印 warning 并跳过可选后处理；本项目的跟踪与重传播结果不受影响。
 
 ## 项目结构
 
 ```text
-src/object_overlay/   核心代码
-examples/drone/       无人机样例
-tests/                核心功能测试
+src/object_overlay/
+    cli.py              # 命令行
+    masking.py          # 现有 Mask 编辑器、背景帧复核、逐帧筛选
+    sam2_tracker.py     # SAM 2.1 跟踪状态、锚点注入、重传播、缓存
+    pipeline.py         # 抽帧、跟踪、复核、合成流程
+    compose.py          # overlay / ghost 合成
+    video.py            # 抽帧和图片读写
+tests/                  # 自动化测试
 ```

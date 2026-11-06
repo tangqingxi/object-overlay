@@ -256,6 +256,7 @@ def _summarize(config: RunConfig) -> None:
     print()
     print("将按以下设置生成：")
     print(f"  输出内容    {config.mode}")
+    print(f"  目标跟踪    {config.tracker}")
     print(f"  输出目录    {_resolved_output_dir(config)}")
 
     if _is_ghost(config):

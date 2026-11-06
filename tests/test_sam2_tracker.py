@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 
 from object_overlay.sam2_tracker import Sam2Tracker
-from object_overlay.video import read_image, write_image
+from object_overlay.video import write_image
 import cv2
 
 
@@ -123,7 +123,8 @@ def _make_case(root: Path, count: int = 6) -> tuple[list[Path], list[np.ndarray]
     frame_files = [root / f"frame_{index:04d}.png" for index in range(1, count + 1)]
 
     for path, image in zip(frame_files, images):
-        write_image(path, image)
+        if not path.exists():
+            write_image(path, image)
 
     return frame_files, images
 
@@ -291,6 +292,42 @@ class Sam2TrackerTest(unittest.TestCase):
             self.assertEqual(second_predictor.init_calls, 0)
             np.testing.assert_array_equal(second.masks[2], corrected)
             self.assertIn(2, second.anchor_masks)
+
+    def test_base_frame非首帧时向前后两个方向传播(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            root = Path(temporary_dir)
+            tracker, predictor = self._tracker(
+                root,
+                FakePredictor(1),
+                base_index=3,
+            )
+            initial = np.zeros((SIZE, SIZE), dtype=np.uint8)
+            initial[10:20, 10:20] = 255
+
+            with patch.object(
+                Sam2Tracker,
+                "_review_initial_mask",
+                return_value=("accept", initial),
+            ):
+                tracker.prepare()
+
+            for frame_index in range(6):
+                self.assertGreater(
+                    int(np.count_nonzero(tracker.masks[frame_index])),
+                    0,
+                )
+
+            # 初始化帧在 3：反向传播到 0，正向传播到 5。
+            directions = {
+                reverse for _start, reverse in predictor.propagate_calls
+            }
+            self.assertEqual(directions, {False, True})
+
+            earlier = np.zeros((SIZE, SIZE), dtype=np.uint8)
+            earlier[40:50, 40:50] = 255
+            tracker.correct(1, earlier)
+            np.testing.assert_array_equal(tracker.masks[1], earlier)
+            np.testing.assert_array_equal(tracker.masks[2], earlier)
 
     def test_force保留人工锚点但重新传播(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_dir:
