@@ -1,3 +1,5 @@
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -9,12 +11,33 @@ from .video import read_image, write_image
 MANUAL_ROI_PADDING = 50
 INITIAL_BRUSH_RADIUS = 10
 
+# 背景帧人工修正复用 masks_corrected 目录，但文件名与普通候选帧分开，
+# 避免改变 --base-frame 后把旧的背景 Mask 误当成候选帧修正。
+BACKGROUND_CACHE_MASK_NAME = "background_mask.png"
+BACKGROUND_CACHE_STATE_NAME = "background.json"
+BACKGROUND_SOURCE_AUTO = "auto"
+BACKGROUND_SOURCE_MANUAL = "manual"
+BACKGROUND_SOURCE_SKIPPED = "skipped"
+
 MOTION_SCALE = 0.25
 MOTION_ROI_PADDING = 80
 MOTION_MIN_AREA_RATIO = 0.00002
 MOTION_MAX_AREA_RATIO = 0.08
 MOTION_MAX_WIDTH_RATIO = 0.40
 MOTION_MAX_HEIGHT_RATIO = 0.40
+
+
+@dataclass(frozen=True)
+class SelectionResult:
+    """逐帧复核的结果。
+
+    selected_masks 与抽帧等长，背景帧位置恒为空 Mask，不参与无损叠加；
+    background_mask 是用户最终确认的背景帧 Mask。None 只表示用户主动
+    跳过了背景目标，与"自动检测失败返回空 Mask"是两种不同状态。
+    """
+
+    selected_masks: list[np.ndarray]
+    background_mask: np.ndarray | None = None
 
 
 def _load_saved_mask(
@@ -40,10 +63,15 @@ def _edit_manual_frame(
     force: bool,
     width: int,
     height: int,
+    mask_path: Path | None = None,
 ) -> np.ndarray:
     frame_number = frame_index + 1
     image = images[frame_index]
-    mask_path = mask_dir / f"frame_{frame_number:04d}.png"
+    mask_path = (
+        mask_path
+        if mask_path is not None
+        else mask_dir / f"frame_{frame_number:04d}.png"
+    )
 
     if mask_path.exists() and not force:
         print(f"frame_{frame_number:04d}：读取已有手动 Mask")
@@ -606,19 +634,312 @@ def generate_motion_masks(
     return masks
 
 
+def _background_cache_paths(
+    corrected_mask_dir: Path,
+) -> tuple[Path, Path]:
+    return (
+        corrected_mask_dir / BACKGROUND_CACHE_MASK_NAME,
+        corrected_mask_dir / BACKGROUND_CACHE_STATE_NAME,
+    )
+
+
+def _load_background_selection(
+    corrected_mask_dir: Path,
+    base_index: int,
+    width: int,
+    height: int,
+) -> tuple[str, np.ndarray | None]:
+    """读取背景帧缓存，返回 (来源, Mask)。
+
+    没有缓存时来源为 auto。state 文件记录 base_frame，换了背景帧编号就
+    不再复用旧结果；跳过状态必须由 state 明确记录，不能靠空 Mask 推断。
+    """
+    mask_path, state_path = _background_cache_paths(corrected_mask_dir)
+
+    if not state_path.exists():
+        return BACKGROUND_SOURCE_AUTO, None
+
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"背景帧缓存无法读取：{state_path}") from exc
+
+    if state.get("base_frame") != base_index + 1:
+        return BACKGROUND_SOURCE_AUTO, None
+
+    source = state.get("source")
+
+    if source == BACKGROUND_SOURCE_SKIPPED:
+        return BACKGROUND_SOURCE_SKIPPED, None
+
+    if source != BACKGROUND_SOURCE_MANUAL:
+        raise RuntimeError(f"背景帧缓存状态无效：{state_path}")
+
+    if not mask_path.exists():
+        print("背景帧人工 Mask 缓存缺失，改用自动检测。")
+        return BACKGROUND_SOURCE_AUTO, None
+
+    return (
+        BACKGROUND_SOURCE_MANUAL,
+        _load_saved_mask(mask_path, width, height),
+    )
+
+
+def _save_background_selection(
+    corrected_mask_dir: Path,
+    base_index: int,
+    source: str,
+    mask: np.ndarray | None,
+) -> None:
+    """保存背景帧人工 Mask 或跳过状态。"""
+    corrected_mask_dir.mkdir(parents=True, exist_ok=True)
+    mask_path, state_path = _background_cache_paths(corrected_mask_dir)
+
+    if source == BACKGROUND_SOURCE_MANUAL:
+        if mask is None:
+            raise ValueError("保存背景帧人工 Mask 时缺少 Mask。")
+
+        write_image(mask_path, mask)
+    elif mask_path.exists():
+        mask_path.unlink()
+
+    state_path.write_text(
+        json.dumps(
+            {
+                "base_frame": base_index + 1,
+                "source": source,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _clear_background_selection(corrected_mask_dir: Path) -> None:
+    """删除背景帧缓存，让下次运行重新使用自动检测。"""
+    mask_path, state_path = _background_cache_paths(corrected_mask_dir)
+
+    for path in (mask_path, state_path):
+        if path.exists():
+            path.unlink()
+
+
+def _review_background_frame(
+    images: list[np.ndarray],
+    auto_mask: np.ndarray,
+    base_index: int,
+    corrected_mask_dir: Path,
+    interval: float,
+    force: bool,
+) -> np.ndarray | None:
+    """复核背景帧目标；返回确认的 Mask，用户跳过时返回 None。"""
+    height, width = images[0].shape[:2]
+    frame_name = f"frame_{base_index + 1:04d}"
+    display_scale = min(1500 / width, 850 / height, 1.0)
+    window_name = f"Review Base Frame - {frame_name}"
+    corrected_mask_dir.mkdir(parents=True, exist_ok=True)
+
+    state_path = corrected_mask_dir / BACKGROUND_CACHE_STATE_NAME
+
+    if force and state_path.exists():
+        print("--force：忽略已有背景帧人工缓存，重新使用自动检测。")
+        # 先不删除旧缓存：用户可能只是看一眼自动结果就取消。确认接受
+        # 自动 Mask 时再清理，避免 --force 意外丢掉修正结果。
+        mask_source, cached_mask = BACKGROUND_SOURCE_AUTO, None
+    else:
+        mask_source, cached_mask = _load_background_selection(
+            corrected_mask_dir,
+            base_index,
+            width,
+            height,
+        )
+
+    if mask_source == BACKGROUND_SOURCE_MANUAL and cached_mask is not None:
+        working_mask = cached_mask
+        print(f"{frame_name}：读取已有背景帧人工 Mask")
+    elif mask_source == BACKGROUND_SOURCE_SKIPPED:
+        working_mask = np.zeros((height, width), dtype=np.uint8)
+        print(f"{frame_name}：读取已有背景帧跳过状态")
+    else:
+        working_mask = auto_mask.copy()
+        mask_source = BACKGROUND_SOURCE_AUTO
+
+    print()
+    print("=" * 60)
+    print(f"BASE FRAME：{frame_name}")
+    print("Enter 或空格：接受当前背景 Mask")
+    print("M：手动重新框选并修正背景 Mask")
+    print("R：恢复背景帧自动检测 Mask")
+    print("S：跳过背景目标，不擦除也不纳入残影序列")
+    print("Q 或 Esc：取消本次选择")
+    print("=" * 60)
+
+    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+
+    try:
+        while True:
+            preview = images[base_index].copy()
+
+            if mask_source != BACKGROUND_SOURCE_SKIPPED:
+                selected = working_mask > 0
+
+                if np.any(selected):
+                    preview[selected] = images[base_index][selected]
+                    current_pixels = preview[selected].astype(np.float32)
+                    green = np.zeros_like(current_pixels)
+                    green[:, 1] = 255
+                    preview[selected] = (
+                        current_pixels * 0.68 + green * 0.32
+                    ).clip(0, 255).astype(np.uint8)
+
+            time_seconds = base_index * interval
+            state_text = (
+                "SKIPPED"
+                if mask_source == BACKGROUND_SOURCE_SKIPPED
+                else "UNDECIDED"
+            )
+            cv2.putText(
+                preview,
+                f"BASE FRAME  {frame_name}  t~{time_seconds:.1f}s  "
+                f"Mask: {mask_source.upper()}  Current: {state_text}",
+                (30, 50),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.1,
+                (0, 255, 255),
+                3,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                preview,
+                "Enter/Space=accept   M=manual correction   "
+                "R=restore auto",
+                (30, 100),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                preview,
+                "S=skip background target   Q/Esc=cancel",
+                (30, 150),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            preview = cv2.resize(
+                preview,
+                None,
+                fx=display_scale,
+                fy=display_scale,
+                interpolation=cv2.INTER_AREA,
+            )
+            cv2.imshow(window_name, preview)
+            key = cv2.waitKey(0) & 0xFF
+
+            if key in (10, 13, 32):
+                if mask_source == BACKGROUND_SOURCE_SKIPPED:
+                    _save_background_selection(
+                        corrected_mask_dir,
+                        base_index,
+                        BACKGROUND_SOURCE_SKIPPED,
+                        None,
+                    )
+                    print(f"{frame_name}：跳过背景目标")
+                    return None
+
+                if mask_source == BACKGROUND_SOURCE_MANUAL:
+                    _save_background_selection(
+                        corrected_mask_dir,
+                        base_index,
+                        BACKGROUND_SOURCE_MANUAL,
+                        working_mask,
+                    )
+                else:
+                    _clear_background_selection(corrected_mask_dir)
+
+                print(
+                    f"{frame_name}：接受背景帧 Mask"
+                    f"（{mask_source.upper()}）"
+                )
+                return working_mask.copy()
+
+            if key in (ord("s"), ord("S")):
+                _save_background_selection(
+                    corrected_mask_dir,
+                    base_index,
+                    BACKGROUND_SOURCE_SKIPPED,
+                    None,
+                )
+                print(f"{frame_name}：跳过背景目标")
+                return None
+
+            if key in (ord("m"), ord("M")):
+                working_mask = _edit_manual_frame(
+                    base_index,
+                    images,
+                    corrected_mask_dir,
+                    True,
+                    width,
+                    height,
+                    mask_path=(
+                        corrected_mask_dir / BACKGROUND_CACHE_MASK_NAME
+                    ),
+                )
+                mask_source = BACKGROUND_SOURCE_MANUAL
+                _save_background_selection(
+                    corrected_mask_dir,
+                    base_index,
+                    BACKGROUND_SOURCE_MANUAL,
+                    working_mask,
+                )
+                print(f"{frame_name}：背景帧已使用人工修正 Mask")
+                continue
+
+            if key in (ord("r"), ord("R")):
+                working_mask = auto_mask.copy()
+                mask_source = BACKGROUND_SOURCE_AUTO
+                _clear_background_selection(corrected_mask_dir)
+                print(f"{frame_name}：已恢复背景帧自动 Mask")
+                continue
+
+            if key in (27, ord("q"), ord("Q")):
+                raise RuntimeError("已取消本次选择。")
+    finally:
+        cv2.destroyWindow(window_name)
+
+
 def select_motion_masks(
     images: list[np.ndarray],
     motion_masks: list[np.ndarray],
     corrected_mask_dir: Path,
     base_index: int,
     interval: float,
-) -> list[np.ndarray]:
-    """逐帧预览自动 Mask，由用户决定是否纳入最终叠加图。"""
+    *,
+    background_auto_mask: np.ndarray | None = None,
+    force: bool = False,
+) -> SelectionResult:
+    """逐帧预览自动 Mask，由用户决定是否纳入最终叠加图。
+
+    background_auto_mask 不为 None 时，先复核背景帧再进入普通候选帧；
+    返回的 background_mask 为最终确认结果，None 表示用户主动跳过。
+    """
     if len(images) != len(motion_masks):
         raise RuntimeError("预览帧数量与运动 Mask 数量不一致。")
 
-    selections: dict[str, bool] = {}
     height, width = images[0].shape[:2]
+
+    if (
+        background_auto_mask is not None
+        and background_auto_mask.shape != (height, width)
+    ):
+        raise RuntimeError("背景帧 Mask 尺寸与视频帧不一致。")
+
+    selections: dict[str, bool] = {}
     display_scale = min(1500 / width, 850 / height, 1.0)
     window_name = "Select Target Moments"
     candidate_indices = [
@@ -636,19 +957,20 @@ def select_motion_masks(
     def corrected_mask_path(frame_index: int) -> Path:
         return corrected_mask_dir / f"{frame_name_at(frame_index)}.png"
 
-    for frame_index in candidate_indices:
-        mask_path = corrected_mask_path(frame_index)
+    if not force:
+        for frame_index in candidate_indices:
+            mask_path = corrected_mask_path(frame_index)
 
-        if mask_path.exists():
-            working_masks[frame_index] = _load_saved_mask(
-                mask_path,
-                width,
-                height,
-            )
-            corrected_indices.add(frame_index)
+            if mask_path.exists():
+                working_masks[frame_index] = _load_saved_mask(
+                    mask_path,
+                    width,
+                    height,
+                )
+                corrected_indices.add(frame_index)
 
-    if corrected_indices:
-        print(f"复用已有人工修正 Mask：{len(corrected_indices)} 张")
+        if corrected_indices:
+            print(f"复用已有人工修正 Mask：{len(corrected_indices)} 张")
 
     def build_selected_masks() -> list[np.ndarray]:
         result: list[np.ndarray] = []
@@ -687,6 +1009,8 @@ def select_motion_masks(
 
         return cumulative, included_count
 
+    background_mask: np.ndarray | None = None
+    review_background = background_auto_mask is not None
     cursor = 0
     cumulative, included_count = build_cumulative(cursor)
 
@@ -698,16 +1022,108 @@ def select_motion_masks(
     print("M：手动重新框选并修正当前目标")
     print("R：恢复当前帧的自动 Mask")
     print("Q 或 Esc：取消本次选择")
+    print(
+        "首个普通候选帧再按 B 会返回背景帧复核。"
+    )
 
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
 
     try:
-        while cursor <= len(candidate_indices):
-            if cursor == len(candidate_indices):
+        while True:
+            if review_background:
+                background_mask = _review_background_frame(
+                    images,
+                    background_auto_mask,
+                    base_index,
+                    corrected_mask_dir,
+                    interval,
+                    force,
+                )
+                review_background = False
+                cursor = 0
+                cumulative, included_count = build_cumulative(cursor)
+
+            back_to_background = False
+
+            while cursor <= len(candidate_indices):
+                if cursor == len(candidate_indices):
+                    preview = cumulative.copy()
+                    cv2.putText(
+                        preview,
+                        f"Selection complete  Included: {included_count}",
+                        (30, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.1,
+                        (0, 255, 255),
+                        3,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        preview,
+                        "Enter/Space=finish   B/Backspace=back   Q=cancel",
+                        (30, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        (0, 255, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                    preview = cv2.resize(
+                        preview,
+                        None,
+                        fx=display_scale,
+                        fy=display_scale,
+                        interpolation=cv2.INTER_AREA,
+                    )
+                    cv2.imshow(window_name, preview)
+                    key = cv2.waitKey(0) & 0xFF
+
+                    if key in (10, 13, 32):
+                        break
+
+                    if key in (8, 127, ord("b"), ord("B")):
+                        cursor -= 1
+                        cumulative, included_count = build_cumulative(cursor)
+                        continue
+
+                    if key in (27, ord("q"), ord("Q")):
+                        raise RuntimeError("已取消本次选择。")
+
+                    continue
+
+                frame_index = candidate_indices[cursor]
+                frame_name = frame_name_at(frame_index)
+                working_mask = working_masks[frame_index]
                 preview = cumulative.copy()
+                selected = working_mask > 0
+
+                # 当前候选使用原始像素并叠加绿色，已接受目标保留原始颜色。
+                preview[selected] = images[frame_index][selected]
+                current_pixels = preview[selected].astype(np.float32)
+                green = np.zeros_like(current_pixels)
+                green[:, 1] = 255
+                preview[selected] = (
+                    current_pixels * 0.68 + green * 0.32
+                ).clip(0, 255).astype(np.uint8)
+
+                time_seconds = frame_index * interval
+                current_state = selections.get(frame_name)
+                mask_source = (
+                    "MANUAL"
+                    if frame_index in corrected_indices
+                    else "AUTO"
+                )
+                state_text = (
+                    "INCLUDED"
+                    if current_state is True
+                    else "SKIPPED"
+                    if current_state is False
+                    else "UNDECIDED"
+                )
                 cv2.putText(
                     preview,
-                    f"Selection complete  Included: {included_count}",
+                    f"{frame_name}  t~{time_seconds:.1f}s  "
+                    f"Mask: {mask_source}  Current: {state_text}",
                     (30, 50),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     1.1,
@@ -717,8 +1133,19 @@ def select_motion_masks(
                 )
                 cv2.putText(
                     preview,
-                    "Enter/Space=finish   B/Backspace=back   Q=cancel",
+                    f"Included: {included_count}   "
+                    "Enter/Space=include   S=skip   B=back   Q=quit",
                     (30, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.putText(
+                    preview,
+                    "M=manual correction   R=restore auto mask",
+                    (30, 150),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.9,
                     (0, 255, 255),
@@ -736,146 +1163,75 @@ def select_motion_masks(
                 key = cv2.waitKey(0) & 0xFF
 
                 if key in (10, 13, 32):
-                    break
+                    selections[frame_name] = True
+                    cumulative[selected] = images[frame_index][selected]
+                    included_count += 1
+                    cursor += 1
+                    print(
+                        f"{frame_name}：纳入叠加图，"
+                        f"当前共 {included_count} 个"
+                    )
+                    continue
+
+                if key in (ord("s"), ord("S")):
+                    selections[frame_name] = False
+                    cursor += 1
+                    print(f"{frame_name}：跳过")
+                    continue
 
                 if key in (8, 127, ord("b"), ord("B")):
-                    cursor -= 1
-                    cumulative, included_count = build_cumulative(cursor)
+                    if cursor > 0:
+                        cursor -= 1
+                        cumulative, included_count = build_cumulative(cursor)
+                        print(
+                            f"回退到 {frame_name_at(candidate_indices[cursor])}"
+                        )
+                    elif background_auto_mask is not None:
+                        print("返回背景帧复核")
+                        back_to_background = True
+                        break
+                    continue
+
+                if key in (ord("m"), ord("M")):
+                    working_masks[frame_index] = _edit_manual_frame(
+                        frame_index,
+                        images,
+                        corrected_mask_dir,
+                        True,
+                        width,
+                        height,
+                    )
+                    corrected_indices.add(frame_index)
+                    print(f"{frame_name}：已使用人工修正 Mask")
+                    continue
+
+                if key in (ord("r"), ord("R")):
+                    working_masks[frame_index] = motion_masks[
+                        frame_index
+                    ].copy()
+                    corrected_indices.discard(frame_index)
+                    mask_path = corrected_mask_path(frame_index)
+
+                    if mask_path.exists():
+                        mask_path.unlink()
+
+                    print(f"{frame_name}：已恢复自动 Mask")
                     continue
 
                 if key in (27, ord("q"), ord("Q")):
                     raise RuntimeError("已取消本次选择。")
 
+            if back_to_background:
+                review_background = True
                 continue
 
-            frame_index = candidate_indices[cursor]
-            frame_name = frame_name_at(frame_index)
-            working_mask = working_masks[frame_index]
-            preview = cumulative.copy()
-            selected = working_mask > 0
-
-            # 当前候选使用原始像素并叠加绿色，已接受目标保留原始颜色。
-            preview[selected] = images[frame_index][selected]
-            current_pixels = preview[selected].astype(np.float32)
-            green = np.zeros_like(current_pixels)
-            green[:, 1] = 255
-            preview[selected] = (
-                current_pixels * 0.68 + green * 0.32
-            ).clip(0, 255).astype(np.uint8)
-
-            time_seconds = frame_index * interval
-            current_state = selections.get(frame_name)
-            mask_source = (
-                "MANUAL"
-                if frame_index in corrected_indices
-                else "AUTO"
-            )
-            state_text = (
-                "INCLUDED"
-                if current_state is True
-                else "SKIPPED"
-                if current_state is False
-                else "UNDECIDED"
-            )
-            cv2.putText(
-                preview,
-                f"{frame_name}  t~{time_seconds:.1f}s  "
-                f"Mask: {mask_source}  Current: {state_text}",
-                (30, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.1,
-                (0, 255, 255),
-                3,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                preview,
-                f"Included: {included_count}   "
-                "Enter/Space=include   S=skip   B=back   Q=quit",
-                (30, 100),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            cv2.putText(
-                preview,
-                "M=manual correction   R=restore auto mask",
-                (30, 150),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-            preview = cv2.resize(
-                preview,
-                None,
-                fx=display_scale,
-                fy=display_scale,
-                interpolation=cv2.INTER_AREA,
-            )
-            cv2.imshow(window_name, preview)
-            key = cv2.waitKey(0) & 0xFF
-
-            if key in (10, 13, 32):
-                selections[frame_name] = True
-                cumulative[selected] = images[frame_index][selected]
-                included_count += 1
-                cursor += 1
-                print(
-                    f"{frame_name}：纳入叠加图，"
-                    f"当前共 {included_count} 个"
-                )
-                continue
-
-            if key in (ord("s"), ord("S")):
-                selections[frame_name] = False
-                cursor += 1
-                print(f"{frame_name}：跳过")
-                continue
-
-            if key in (8, 127, ord("b"), ord("B")):
-                if cursor > 0:
-                    cursor -= 1
-                    cumulative, included_count = build_cumulative(cursor)
-                    print(
-                        f"回退到 {frame_name_at(candidate_indices[cursor])}"
-                    )
-                continue
-
-            if key in (ord("m"), ord("M")):
-                working_masks[frame_index] = _edit_manual_frame(
-                    frame_index,
-                    images,
-                    corrected_mask_dir,
-                    True,
-                    width,
-                    height,
-                )
-                corrected_indices.add(frame_index)
-                print(f"{frame_name}：已使用人工修正 Mask")
-                continue
-
-            if key in (ord("r"), ord("R")):
-                working_masks[frame_index] = motion_masks[
-                    frame_index
-                ].copy()
-                corrected_indices.discard(frame_index)
-                mask_path = corrected_mask_path(frame_index)
-
-                if mask_path.exists():
-                    mask_path.unlink()
-
-                print(f"{frame_name}：已恢复自动 Mask")
-                continue
-
-            if key in (27, ord("q"), ord("Q")):
-                raise RuntimeError("已取消本次选择。")
+            break
     finally:
         cv2.destroyWindow(window_name)
 
     included_count = sum(selections.values())
     print(f"选择完成：纳入 {included_count} 个目标位置")
-    return build_selected_masks()
+    return SelectionResult(
+        selected_masks=build_selected_masks(),
+        background_mask=background_mask,
+    )

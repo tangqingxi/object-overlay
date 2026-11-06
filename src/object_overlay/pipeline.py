@@ -213,14 +213,29 @@ def run_pipeline(config: RunConfig) -> RunResult:
         base_index,
     )
 
+    # 残影版需要背景帧目标。启用复核时，自动结果只作为复核界面的初值
+    # （以及 R 的恢复目标），用户确认后不会再重新检测覆盖它。
+    auto_background_mask = (
+        detect_background_object(images, base_index)
+        if want_ghost
+        else None
+    )
+    background_mask = auto_background_mask
+
     if config.select:
-        masks = select_motion_masks(
+        selection = select_motion_masks(
             images,
             masks,
             output_dir / "masks_corrected",
             base_index,
             config.interval,
+            background_auto_mask=auto_background_mask,
+            force=config.force,
         )
+        masks = selection.selected_masks
+
+        if want_ghost:
+            background_mask = selection.background_mask
 
     # 产物文件名不再随 --select 变化，人工筛选的痕迹记进抽帧记录。
     update_metadata(
@@ -241,10 +256,12 @@ def run_pipeline(config: RunConfig) -> RunResult:
         )
 
     if want_ghost:
-        # 只有残影版需要知道背景帧里的目标在哪。
-        background_mask = detect_background_object(images, base_index)
-
-        if not background_mask.any():
+        if background_mask is None:
+            print(
+                "已跳过背景帧目标：不擦除背景，"
+                "也不纳入残影序列。"
+            )
+        elif not background_mask.any():
             print("背景帧里没有检测到目标。")
 
         ghost_png = compose_ghost_overlay(

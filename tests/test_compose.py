@@ -72,7 +72,7 @@ class ComposeOverlayTest(unittest.TestCase):
                 patch("cv2.waitKey", side_effect=keys),
                 patch("cv2.destroyWindow"),
             ):
-                selected = select_motion_masks(
+                result = select_motion_masks(
                     images,
                     masks,
                     Path(temporary_dir) / "masks_corrected",
@@ -80,6 +80,7 @@ class ComposeOverlayTest(unittest.TestCase):
                     interval=0.5,
                 )
 
+            selected = result.selected_masks
             self.assertEqual(cv2.countNonZero(selected[1]), 1)
             self.assertEqual(cv2.countNonZero(selected[2]), 1)
             np.testing.assert_array_equal(
@@ -111,7 +112,7 @@ class ComposeOverlayTest(unittest.TestCase):
                     return_value=corrected_mask,
                 ) as edit_manual,
             ):
-                selected = select_motion_masks(
+                result = select_motion_masks(
                     images,
                     automatic_masks,
                     Path(temporary_dir) / "masks_corrected",
@@ -120,6 +121,7 @@ class ComposeOverlayTest(unittest.TestCase):
                 )
 
             edit_manual.assert_called_once()
+            selected = result.selected_masks
             self.assertEqual(selected[1][10, 10], 0)
             self.assertEqual(selected[1][50, 50], 255)
 

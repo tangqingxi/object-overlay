@@ -184,7 +184,7 @@ def _apply_interval(config: RunConfig, index: int) -> RunConfig:
 
 _SELECT_OPTIONS = (
     ("否", "直接用自动识别的全部目标，认错了也照收"),
-    ("是", "逐帧看：剔除认错的对象，Mask 不准的还能手动修"),
+    ("是", "逐帧看：先复核背景帧，再剔除认错的对象、修 Mask"),
 )
 
 

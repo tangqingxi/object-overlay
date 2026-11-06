@@ -63,8 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--select",
         action="store_true",
         help=(
-            "逐帧复核自动识别的结果：剔除认错的对象，"
-            "Mask 不准的还能手动修正"
+            "逐帧复核自动识别的结果：先复核背景帧，"
+            "再剔除认错的对象；Mask 不准的还能手动修正"
         ),
     )
 
