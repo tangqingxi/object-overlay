@@ -3,7 +3,15 @@ import sys
 from pathlib import Path
 
 from .compose import GHOST_MIN_ALPHA
-from .pipeline import OUTPUT_MODES, RunConfig, run_pipeline
+from .pipeline import (
+    DEFAULT_SAM2_MODEL,
+    DEFAULT_SAM2_TRACK_FPS,
+    OUTPUT_MODES,
+    TRACKERS,
+    RunConfig,
+    run_pipeline,
+)
+from .sam2_tracker import SAM2_MODELS
 from .trajectory import (
     TRAJECTORY_COLOR,
     format_hex_color,
@@ -18,6 +26,28 @@ def _trajectory_color(text: str) -> tuple[int, int, int]:
         return parse_hex_color(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _sam2_box(text: str) -> tuple[int, int, int, int]:
+    """解析无 GUI 初始化框：x,y,w,h。"""
+    parts = text.replace("，", ",").split(",")
+
+    if len(parts) != 4:
+        raise argparse.ArgumentTypeError("框需要 x,y,w,h 四个整数")
+
+    try:
+        x, y, width, height = (int(part.strip()) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "框坐标必须是整数：x,y,w,h"
+        ) from exc
+
+    if x < 0 or y < 0 or width <= 0 or height <= 0:
+        raise argparse.ArgumentTypeError(
+            "框坐标不能为负，宽高必须大于 0"
+        )
+
+    return x, y, width, height
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,6 +95,52 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "逐帧复核自动识别的结果：先复核背景帧，"
             "再剔除认错的对象；Mask 不准的还能手动修正"
+        ),
+    )
+
+    tracking = parser.add_argument_group("目标跟踪")
+    tracking.add_argument(
+        "--tracker",
+        choices=TRACKERS,
+        default="motion",
+        help=(
+            "目标 Mask 后端：motion=原有背景差分，"
+            "sam2=SAM 2.1 视频跟踪，默认 motion"
+        ),
+    )
+    tracking.add_argument(
+        "--sam2-model",
+        choices=tuple(SAM2_MODELS),
+        default=DEFAULT_SAM2_MODEL,
+        help=f"SAM 2.1 模型类型，默认 {DEFAULT_SAM2_MODEL}",
+    )
+    tracking.add_argument(
+        "--sam2-checkpoint",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "SAM 2.1 权重路径；也可用 SAM2_CHECKPOINT 环境变量，"
+            "默认 checkpoints/<model>.pt"
+        ),
+    )
+    tracking.add_argument(
+        "--sam2-track-fps",
+        type=float,
+        default=DEFAULT_SAM2_TRACK_FPS,
+        help=(
+            "SAM 2.1 密集跟踪采样的目标帧率，"
+            f"默认 {DEFAULT_SAM2_TRACK_FPS:g}；输出仍按 --interval"
+        ),
+    )
+    tracking.add_argument(
+        "--sam2-init-box",
+        type=_sam2_box,
+        default=None,
+        metavar="x,y,w,h",
+        help=(
+            "无 GUI 环境下直接指定初始目标框（原分辨率坐标），"
+            "仅用于自动化；正常使用可省略并在窗口里框选"
         ),
     )
 
@@ -135,6 +211,11 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output_dir,
         force=args.force,
         select=args.select,
+        tracker=args.tracker,
+        sam2_model=args.sam2_model,
+        sam2_checkpoint=args.sam2_checkpoint,
+        sam2_track_fps=args.sam2_track_fps,
+        sam2_init_box=args.sam2_init_box,
         ghost_min_alpha=args.ghost_min_alpha,
         show_trajectory=args.trajectory,
         trajectory_color=args.trajectory_color,

@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -261,6 +261,163 @@ class BackgroundSelectionPipelineTest(unittest.TestCase):
             compose_ghost.call_args.kwargs["background_mask"],
             auto_background,
         )
+
+
+class Sam2PipelineTest(unittest.TestCase):
+    def _run(self, mode: str, select: bool):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            output_dir = Path(temporary_dir)
+            images = [
+                np.zeros((80, 80, 3), dtype=np.uint8)
+                for _ in range(3)
+            ]
+            tracker_masks = [
+                np.zeros((80, 80), dtype=np.uint8)
+                for _ in range(3)
+            ]
+            tracker_masks[1][10:20, 10:20] = 255
+            selected_masks = [
+                np.zeros((80, 80), dtype=np.uint8)
+                for _ in range(3)
+            ]
+            selected_masks[1][10:20, 10:20] = 255
+            auto_background = np.zeros((80, 80), dtype=np.uint8)
+            auto_background[30:40, 30:40] = 255
+            manual_background = np.zeros((80, 80), dtype=np.uint8)
+            manual_background[50:60, 50:60] = 255
+            selection = SelectionResult(
+                selected_masks=selected_masks,
+                background_mask=manual_background,
+            )
+            frame_files = [
+                output_dir / f"frame_{index:04d}.png"
+                for index in range(1, 4)
+            ]
+            config = RunConfig(
+                video_path=Path("clip.mp4"),
+                mode=mode,
+                select=select,
+                tracker="sam2",
+                base_frame=1,
+                output_dir=output_dir,
+            )
+
+            fake_tracker = MagicMock()
+            fake_tracker.masks = tracker_masks
+            fake_tracker.background_mask = auto_background
+            hooks = MagicMock()
+            fake_tracker.hooks.return_value = hooks
+
+            with (
+                patch(
+                    "object_overlay.pipeline._resolve_config",
+                    return_value=config,
+                ),
+                patch(
+                    "object_overlay.pipeline.prepare_frames",
+                    return_value=frame_files,
+                ),
+                patch(
+                    "object_overlay.pipeline.load_preview_frames",
+                    return_value=(images, 80, 80),
+                ),
+                patch(
+                    "object_overlay.pipeline.generate_motion_masks",
+                ) as motion_masks,
+                patch(
+                    "object_overlay.pipeline.detect_background_object",
+                ) as detect,
+                patch(
+                    "object_overlay.sam2_tracker.Sam2Tracker",
+                    return_value=fake_tracker,
+                ) as tracker_class,
+                patch(
+                    "object_overlay.pipeline.select_motion_masks",
+                    return_value=selection,
+                ) as select_masks,
+                patch(
+                    "object_overlay.pipeline.compose_overlay",
+                    return_value=None,
+                ) as compose_overlay,
+                patch(
+                    "object_overlay.pipeline.compose_ghost_overlay",
+                    return_value=Path("ghost.png"),
+                ) as compose_ghost,
+                patch(
+                    "object_overlay.pipeline.update_metadata",
+                ) as update_metadata,
+            ):
+                from object_overlay.pipeline import run_pipeline
+
+                run_pipeline(config)
+
+            return (
+                fake_tracker,
+                hooks,
+                tracker_class,
+                motion_masks,
+                detect,
+                select_masks,
+                compose_overlay,
+                compose_ghost,
+                update_metadata,
+            )
+
+    def test_sam2使用视频跟踪且不走motion自动Mask(self) -> None:
+        (
+            fake_tracker,
+            hooks,
+            tracker_class,
+            motion_masks,
+            detect,
+            select_masks,
+            compose_overlay,
+            compose_ghost,
+            update_metadata,
+        ) = self._run("both", True)
+
+        fake_tracker.prepare.assert_called_once()
+        motion_masks.assert_not_called()
+        detect.assert_not_called()
+        tracker_class.assert_called_once()
+        self.assertEqual(
+            tracker_class.call_args.kwargs["model_name"],
+            "sam2.1_hiera_small",
+        )
+        self.assertIs(select_masks.call_args.kwargs["tracking"], hooks)
+        self.assertIsNot(
+            select_masks.call_args.kwargs["background_auto_mask"],
+            None,
+        )
+        self.assertIsNotNone(compose_overlay.call_args)
+        self.assertIs(
+            compose_ghost.call_args.kwargs["background_mask"],
+            select_masks.return_value.background_mask,
+        )
+        self.assertEqual(
+            update_metadata.call_args.kwargs["tracker"],
+            "sam2",
+        )
+
+    def test_sam2_overlay模式不做背景帧复核(self) -> None:
+        (
+            _fake_tracker,
+            _hooks,
+            _tracker_class,
+            _motion_masks,
+            detect,
+            select_masks,
+            compose_overlay,
+            compose_ghost,
+            _update_metadata,
+        ) = self._run("overlay", True)
+
+        detect.assert_not_called()
+        self.assertIsNone(
+            select_masks.call_args.kwargs["background_auto_mask"]
+        )
+        compose_overlay.assert_called_once()
+        compose_ghost.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -23,6 +23,11 @@ from .video import (
 # --mode 的取值：只出无损版、只出残影版、两个都出。
 OUTPUT_MODES = ("overlay", "ghost", "both")
 
+# --tracker 的取值：原有背景差分 / SAM 2.1 视频跟踪。
+TRACKERS = ("motion", "sam2")
+DEFAULT_SAM2_MODEL = "sam2.1_hiera_small"
+DEFAULT_SAM2_TRACK_FPS = 15.0
+
 # 视频放在这个目录名下时，产物默认落到它的兄弟目录 output 里。
 INPUT_DIR_NAME = "input"
 
@@ -52,6 +57,11 @@ class RunConfig:
     output_dir: Path | None = None
     force: bool = False
     select: bool = False
+    tracker: str = "motion"
+    sam2_model: str = DEFAULT_SAM2_MODEL
+    sam2_checkpoint: Path | None = None
+    sam2_track_fps: float = DEFAULT_SAM2_TRACK_FPS
+    sam2_init_box: tuple[int, int, int, int] | None = None
     ghost_min_alpha: float = GHOST_MIN_ALPHA
     show_trajectory: bool = True
     trajectory_color: tuple[int, int, int] = TRAJECTORY_COLOR
@@ -77,6 +87,23 @@ def _resolve_config(config: RunConfig) -> RunConfig:
             f"不支持的模式：{config.mode}，"
             f"可选 {'、'.join(OUTPUT_MODES)}"
         )
+
+    if config.tracker not in TRACKERS:
+        raise ValueError(
+            f"不支持的跟踪后端：{config.tracker}，"
+            f"可选 {'、'.join(TRACKERS)}"
+        )
+
+    if config.sam2_track_fps <= 0:
+        raise ValueError("--sam2-track-fps 必须大于 0")
+
+    if config.sam2_init_box is not None:
+        if (
+            len(config.sam2_init_box) != 4
+            or config.sam2_init_box[2] <= 0
+            or config.sam2_init_box[3] <= 0
+        ):
+            raise ValueError("--sam2-init-box 需要 x,y,w,h 且宽高大于 0")
 
     if config.interval <= 0:
         raise ValueError("--interval 必须大于 0")
@@ -105,6 +132,11 @@ def _resolve_config(config: RunConfig) -> RunConfig:
         output_dir=output_dir,
         force=config.force,
         select=config.select,
+        tracker=config.tracker,
+        sam2_model=config.sam2_model,
+        sam2_checkpoint=config.sam2_checkpoint,
+        sam2_track_fps=config.sam2_track_fps,
+        sam2_init_box=config.sam2_init_box,
         ghost_min_alpha=config.ghost_min_alpha,
         show_trajectory=config.show_trajectory,
         trajectory_color=config.trajectory_color,
@@ -118,9 +150,15 @@ def _print_header(config: RunConfig, output_dir: Path, want_ghost: bool) -> None
     print(f"视频：{config.video_path}")
     print(f"输出目录：{output_dir}")
     print(f"输出内容：{config.mode}")
+    print(f"跟踪后端：{config.tracker}")
     print(f"抽帧间隔：{config.interval:g} 秒")
     print(f"背景帧：第 {config.base_frame} 张抽帧")
     print(f"人工筛选：{'是' if config.select else '否'}")
+
+    if config.tracker == "sam2":
+        print(f"SAM 2.1 模型：{config.sam2_model}")
+        print(f"SAM 2.1 权重：{config.sam2_checkpoint or 'checkpoints/<model>.pt'}")
+        print(f"SAM 2.1 跟踪采样：约 {config.sam2_track_fps:g} FPS")
 
     if want_ghost:
         print(f"残影最早时刻不透明度：{config.ghost_min_alpha:g}")
@@ -205,21 +243,48 @@ def run_pipeline(config: RunConfig) -> RunResult:
             f"但当前只有 {len(images)} 张抽帧。"
         )
 
-    masks = generate_motion_masks(
-        images,
-        motion_mask_dir,
-        output_dir,
-        config.force,
-        base_index,
-    )
+    tracking_hooks = None
 
-    # 残影版需要背景帧目标。启用复核时，自动结果只作为复核界面的初值
-    # （以及 R 的恢复目标），用户确认后不会再重新检测覆盖它。
-    auto_background_mask = (
-        detect_background_object(images, base_index)
-        if want_ghost
-        else None
-    )
+    if config.tracker == "sam2":
+        # 延迟导入：默认安装和 motion 后端都不需要 torch / sam2。
+        from .sam2_tracker import Sam2Tracker
+
+        tracker = Sam2Tracker(
+            config.video_path,
+            frame_files,
+            images,
+            output_dir,
+            base_index,
+            config.interval,
+            model_name=config.sam2_model,
+            checkpoint=config.sam2_checkpoint,
+            force=config.force,
+            target_track_fps=config.sam2_track_fps,
+            initial_box=config.sam2_init_box,
+        )
+        tracker.prepare()
+        masks = tracker.masks
+        tracking_hooks = tracker.hooks()
+        auto_background_mask = (
+            tracker.background_mask if want_ghost else None
+        )
+    else:
+        masks = generate_motion_masks(
+            images,
+            motion_mask_dir,
+            output_dir,
+            config.force,
+            base_index,
+        )
+
+        # 残影版需要背景帧目标。启用复核时，自动结果只作为复核界面的
+        # 初值（以及 R 的恢复目标），用户确认后不会再重新检测覆盖它。
+        auto_background_mask = (
+            detect_background_object(images, base_index)
+            if want_ghost
+            else None
+        )
+
     background_mask = auto_background_mask
 
     if config.select:
@@ -231,6 +296,7 @@ def run_pipeline(config: RunConfig) -> RunResult:
             config.interval,
             background_auto_mask=auto_background_mask,
             force=config.force,
+            tracking=tracking_hooks,
         )
         masks = selection.selected_masks
 
@@ -242,6 +308,7 @@ def run_pipeline(config: RunConfig) -> RunResult:
         metadata_file,
         mode=config.mode,
         curated=config.select,
+        tracker=config.tracker,
     )
 
     overlay = None

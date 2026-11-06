@@ -1,5 +1,6 @@
 import json
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -40,6 +41,25 @@ class SelectionResult:
     background_mask: np.ndarray | None = None
 
 
+@dataclass
+class TrackingHooks:
+    """逐帧复核与跟踪后端之间的最小接口。
+
+    correct/restore 接收候选帧下标和当前 Mask，返回与所有抽帧等长的更新后
+    Mask 列表。这样 SAM 2.1 可以在用户按 M 后重传播下游帧，而 GUI 本身
+    仍然只负责选择和展示。
+    """
+
+    name: str = "motion"
+    manual_indices: set[int] = field(default_factory=set)
+    correct: Callable[[int, np.ndarray], list[np.ndarray]] | None = None
+    restore: Callable[[int], list[np.ndarray]] | None = None
+    keeps_base_mask: bool = False
+    background_manual: bool = False
+    manual_dir: Path | None = None
+    background_mask_path: Path | None = None
+
+
 def _load_saved_mask(
     mask_path: Path,
     width: int,
@@ -54,6 +74,59 @@ def _load_saved_mask(
         raise RuntimeError(f"Mask 尺寸与视频帧不一致：{mask_path}")
 
     return mask
+
+
+def _select_target_roi(
+    image: np.ndarray,
+    frame_number: int,
+    window_prefix: str = "1 Select Target",
+) -> tuple[int, int, int, int]:
+    """在完整画面中框选目标，返回原分辨率坐标 (x, y, w, h)。"""
+    height, width = image.shape[:2]
+    max_width = 1500
+    max_height = 850
+    display_scale = min(
+        max_width / width,
+        max_height / height,
+        1.0,
+    )
+    preview = cv2.resize(
+        image,
+        None,
+        fx=display_scale,
+        fy=display_scale,
+        interpolation=cv2.INTER_AREA,
+    )
+    select_window = f"{window_prefix} - frame_{frame_number:04d}"
+
+    print()
+    print("=" * 60)
+    print(f"frame_{frame_number:04d}")
+    print("第一步：鼠标框住完整目标对象")
+    print("框好以后按 Enter")
+    print("=" * 60)
+
+    try:
+        roi_small = cv2.selectROI(
+            select_window,
+            preview,
+            showCrosshair=True,
+            fromCenter=False,
+        )
+    finally:
+        cv2.destroyWindow(select_window)
+
+    sx, sy, sw, sh = roi_small
+
+    if sw == 0 or sh == 0:
+        raise RuntimeError(f"frame_{frame_number:04d} 未完成框选")
+
+    return (
+        int(sx / display_scale),
+        int(sy / display_scale),
+        int(sw / display_scale),
+        int(sh / display_scale),
+    )
 
 
 def _edit_manual_frame(
@@ -78,48 +151,10 @@ def _edit_manual_frame(
         return _load_saved_mask(mask_path, width, height)
 
     # 第一步：在完整画面中框选目标对象。
-    max_width = 1500
-    max_height = 850
-    display_scale = min(
-        max_width / width,
-        max_height / height,
-        1.0,
-    )
-    preview = cv2.resize(
+    x, y, object_width, object_height = _select_target_roi(
         image,
-        None,
-        fx=display_scale,
-        fy=display_scale,
-        interpolation=cv2.INTER_AREA,
+        frame_number,
     )
-    select_window = f"1 Select Target - frame_{frame_number:04d}"
-
-    print()
-    print("=" * 60)
-    print(f"frame_{frame_number:04d}")
-    print("第一步：鼠标框住完整目标对象")
-    print("框好以后按 Enter")
-    print("=" * 60)
-
-    try:
-        roi_small = cv2.selectROI(
-            select_window,
-            preview,
-            showCrosshair=True,
-            fromCenter=False,
-        )
-    finally:
-        cv2.destroyWindow(select_window)
-
-    sx, sy, sw, sh = roi_small
-
-    if sw == 0 or sh == 0:
-        raise RuntimeError(f"frame_{frame_number:04d} 未完成框选")
-
-    x = int(sx / display_scale)
-    y = int(sy / display_scale)
-    object_width = int(sw / display_scale)
-    object_height = int(sh / display_scale)
 
     # 第二步：在局部区域内使用 GrabCut 生成初始 Mask。
     x0 = max(0, x - MANUAL_ROI_PADDING)
@@ -732,6 +767,13 @@ def _review_background_frame(
     corrected_mask_dir: Path,
     interval: float,
     force: bool,
+    *,
+    tracker_name: str = "motion",
+    initial_source: str = BACKGROUND_SOURCE_AUTO,
+    cache_background: bool = True,
+    correct_mask: Callable[[int, np.ndarray], np.ndarray] | None = None,
+    restore_mask: Callable[[int], np.ndarray] | None = None,
+    manual_mask_path: Path | None = None,
 ) -> np.ndarray | None:
     """复核背景帧目标；返回确认的 Mask，用户跳过时返回 None。"""
     height, width = images[0].shape[:2]
@@ -739,25 +781,36 @@ def _review_background_frame(
     display_scale = min(1500 / width, 850 / height, 1.0)
     window_name = f"Review Base Frame - {frame_name}"
     corrected_mask_dir.mkdir(parents=True, exist_ok=True)
+    edit_mask_path = (
+        manual_mask_path
+        if manual_mask_path is not None
+        else corrected_mask_dir / BACKGROUND_CACHE_MASK_NAME
+    )
 
-    state_path = corrected_mask_dir / BACKGROUND_CACHE_STATE_NAME
+    if cache_background:
+        state_path = corrected_mask_dir / BACKGROUND_CACHE_STATE_NAME
 
-    if force and state_path.exists():
-        print("--force：忽略已有背景帧人工缓存，重新使用自动检测。")
-        # 先不删除旧缓存：用户可能只是看一眼自动结果就取消。确认接受
-        # 自动 Mask 时再清理，避免 --force 意外丢掉修正结果。
-        mask_source, cached_mask = BACKGROUND_SOURCE_AUTO, None
+        if force and state_path.exists():
+            print("--force：忽略已有背景帧人工缓存，重新使用自动检测。")
+            # 先不删除旧缓存：用户可能只是看一眼自动结果就取消。确认接受
+            # 自动 Mask 时再清理，避免 --force 意外丢掉修正结果。
+            mask_source, cached_mask = BACKGROUND_SOURCE_AUTO, None
+        else:
+            mask_source, cached_mask = _load_background_selection(
+                corrected_mask_dir,
+                base_index,
+                width,
+                height,
+            )
     else:
-        mask_source, cached_mask = _load_background_selection(
-            corrected_mask_dir,
-            base_index,
-            width,
-            height,
-        )
+        mask_source, cached_mask = initial_source, None
 
     if mask_source == BACKGROUND_SOURCE_MANUAL and cached_mask is not None:
         working_mask = cached_mask
         print(f"{frame_name}：读取已有背景帧人工 Mask")
+    elif mask_source == BACKGROUND_SOURCE_MANUAL:
+        working_mask = auto_mask.copy()
+        print(f"{frame_name}：当前背景帧使用人工修正 Mask")
     elif mask_source == BACKGROUND_SOURCE_SKIPPED:
         working_mask = np.zeros((height, width), dtype=np.uint8)
         print(f"{frame_name}：读取已有背景帧跳过状态")
@@ -802,6 +855,7 @@ def _review_background_frame(
             cv2.putText(
                 preview,
                 f"BASE FRAME  {frame_name}  t~{time_seconds:.1f}s  "
+                f"Tracker: {tracker_name.upper()}  "
                 f"Mask: {mask_source.upper()}  Current: {state_text}",
                 (30, 50),
                 cv2.FONT_HERSHEY_SIMPLEX,
@@ -843,24 +897,26 @@ def _review_background_frame(
 
             if key in (10, 13, 32):
                 if mask_source == BACKGROUND_SOURCE_SKIPPED:
-                    _save_background_selection(
-                        corrected_mask_dir,
-                        base_index,
-                        BACKGROUND_SOURCE_SKIPPED,
-                        None,
-                    )
+                    if cache_background:
+                        _save_background_selection(
+                            corrected_mask_dir,
+                            base_index,
+                            BACKGROUND_SOURCE_SKIPPED,
+                            None,
+                        )
                     print(f"{frame_name}：跳过背景目标")
                     return None
 
-                if mask_source == BACKGROUND_SOURCE_MANUAL:
-                    _save_background_selection(
-                        corrected_mask_dir,
-                        base_index,
-                        BACKGROUND_SOURCE_MANUAL,
-                        working_mask,
-                    )
-                else:
-                    _clear_background_selection(corrected_mask_dir)
+                if cache_background:
+                    if mask_source == BACKGROUND_SOURCE_MANUAL:
+                        _save_background_selection(
+                            corrected_mask_dir,
+                            base_index,
+                            BACKGROUND_SOURCE_MANUAL,
+                            working_mask,
+                        )
+                    else:
+                        _clear_background_selection(corrected_mask_dir)
 
                 print(
                     f"{frame_name}：接受背景帧 Mask"
@@ -869,41 +925,51 @@ def _review_background_frame(
                 return working_mask.copy()
 
             if key in (ord("s"), ord("S")):
-                _save_background_selection(
-                    corrected_mask_dir,
-                    base_index,
-                    BACKGROUND_SOURCE_SKIPPED,
-                    None,
-                )
+                if cache_background:
+                    _save_background_selection(
+                        corrected_mask_dir,
+                        base_index,
+                        BACKGROUND_SOURCE_SKIPPED,
+                        None,
+                    )
                 print(f"{frame_name}：跳过背景目标")
                 return None
 
             if key in (ord("m"), ord("M")):
-                working_mask = _edit_manual_frame(
+                edited_mask = _edit_manual_frame(
                     base_index,
                     images,
                     corrected_mask_dir,
                     True,
                     width,
                     height,
-                    mask_path=(
-                        corrected_mask_dir / BACKGROUND_CACHE_MASK_NAME
-                    ),
+                    mask_path=edit_mask_path,
+                )
+                working_mask = (
+                    correct_mask(base_index, edited_mask)
+                    if correct_mask is not None
+                    else edited_mask
                 )
                 mask_source = BACKGROUND_SOURCE_MANUAL
-                _save_background_selection(
-                    corrected_mask_dir,
-                    base_index,
-                    BACKGROUND_SOURCE_MANUAL,
-                    working_mask,
-                )
+                if cache_background:
+                    _save_background_selection(
+                        corrected_mask_dir,
+                        base_index,
+                        BACKGROUND_SOURCE_MANUAL,
+                        working_mask,
+                    )
                 print(f"{frame_name}：背景帧已使用人工修正 Mask")
                 continue
 
             if key in (ord("r"), ord("R")):
-                working_mask = auto_mask.copy()
+                working_mask = (
+                    restore_mask(base_index)
+                    if restore_mask is not None
+                    else auto_mask.copy()
+                )
                 mask_source = BACKGROUND_SOURCE_AUTO
-                _clear_background_selection(corrected_mask_dir)
+                if cache_background:
+                    _clear_background_selection(corrected_mask_dir)
                 print(f"{frame_name}：已恢复背景帧自动 Mask")
                 continue
 
@@ -922,6 +988,7 @@ def select_motion_masks(
     *,
     background_auto_mask: np.ndarray | None = None,
     force: bool = False,
+    tracking: TrackingHooks | None = None,
 ) -> SelectionResult:
     """逐帧预览自动 Mask，由用户决定是否纳入最终叠加图。
 
@@ -931,6 +998,7 @@ def select_motion_masks(
     if len(images) != len(motion_masks):
         raise RuntimeError("预览帧数量与运动 Mask 数量不一致。")
 
+    tracking = tracking or TrackingHooks()
     height, width = images[0].shape[:2]
 
     if (
@@ -948,8 +1016,15 @@ def select_motion_masks(
         if index != base_index
     ]
     corrected_mask_dir.mkdir(parents=True, exist_ok=True)
+    manual_dir = tracking.manual_dir or corrected_mask_dir
+    manual_dir.mkdir(parents=True, exist_ok=True)
     working_masks = [mask.copy() for mask in motion_masks]
-    corrected_indices: set[int] = set()
+    corrected_indices: set[int] = set(tracking.manual_indices)
+    background_auto_mask = (
+        background_auto_mask.copy()
+        if background_auto_mask is not None
+        else None
+    )
 
     def frame_name_at(frame_index: int) -> str:
         return f"frame_{frame_index + 1:04d}"
@@ -957,7 +1032,7 @@ def select_motion_masks(
     def corrected_mask_path(frame_index: int) -> Path:
         return corrected_mask_dir / f"{frame_name_at(frame_index)}.png"
 
-    if not force:
+    if tracking.name == "motion" and not force:
         for frame_index in candidate_indices:
             mask_path = corrected_mask_path(frame_index)
 
@@ -1009,6 +1084,51 @@ def select_motion_masks(
 
         return cumulative, included_count
 
+    def apply_tracker_masks(updated_masks: list[np.ndarray]) -> None:
+        if len(updated_masks) != len(working_masks):
+            raise RuntimeError("跟踪器返回的 Mask 数量与抽帧数量不一致。")
+
+        for index, mask in enumerate(updated_masks):
+            working_masks[index] = mask.copy()
+
+    def correct_frame(
+        frame_index: int,
+        mask: np.ndarray,
+    ) -> np.ndarray:
+        nonlocal background_auto_mask
+
+        working_masks[frame_index] = mask.copy()
+
+        if tracking.correct is not None:
+            apply_tracker_masks(tracking.correct(frame_index, mask))
+            working_masks[frame_index] = mask.copy()
+
+        corrected_indices.add(frame_index)
+
+        if tracking.keeps_base_mask:
+            background_auto_mask = working_masks[base_index].copy()
+
+        return working_masks[frame_index].copy()
+
+    def restore_frame(frame_index: int) -> np.ndarray:
+        nonlocal background_auto_mask
+
+        if tracking.restore is not None:
+            apply_tracker_masks(tracking.restore(frame_index))
+        else:
+            working_masks[frame_index] = motion_masks[frame_index].copy()
+            mask_path = corrected_mask_path(frame_index)
+
+            if mask_path.exists():
+                mask_path.unlink()
+
+        corrected_indices.discard(frame_index)
+
+        if tracking.keeps_base_mask:
+            background_auto_mask = working_masks[base_index].copy()
+
+        return working_masks[frame_index].copy()
+
     background_mask: np.ndarray | None = None
     review_background = background_auto_mask is not None
     cursor = 0
@@ -1038,6 +1158,28 @@ def select_motion_masks(
                     corrected_mask_dir,
                     interval,
                     force,
+                    tracker_name=tracking.name,
+                    initial_source=(
+                        BACKGROUND_SOURCE_MANUAL
+                        if tracking.background_manual
+                        else BACKGROUND_SOURCE_AUTO
+                    ),
+                    cache_background=tracking.name == "motion",
+                    correct_mask=(
+                        correct_frame
+                        if tracking.correct is not None
+                        else None
+                    ),
+                    restore_mask=(
+                        restore_frame
+                        if tracking.restore is not None
+                        else None
+                    ),
+                    manual_mask_path=(
+                        tracking.background_mask_path
+                        if tracking.background_mask_path is not None
+                        else corrected_mask_dir / BACKGROUND_CACHE_MASK_NAME
+                    ),
                 )
                 review_background = False
                 cursor = 0
@@ -1111,6 +1253,8 @@ def select_motion_masks(
                 mask_source = (
                     "MANUAL"
                     if frame_index in corrected_indices
+                    else "EMPTY"
+                    if not np.any(selected)
                     else "AUTO"
                 )
                 state_text = (
@@ -1123,6 +1267,7 @@ def select_motion_masks(
                 cv2.putText(
                     preview,
                     f"{frame_name}  t~{time_seconds:.1f}s  "
+                    f"Tracker: {tracking.name.upper()}  "
                     f"Mask: {mask_source}  Current: {state_text}",
                     (30, 50),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -1193,29 +1338,32 @@ def select_motion_masks(
                     continue
 
                 if key in (ord("m"), ord("M")):
-                    working_masks[frame_index] = _edit_manual_frame(
+                    edited_mask = _edit_manual_frame(
                         frame_index,
                         images,
-                        corrected_mask_dir,
+                        manual_dir,
                         True,
                         width,
                         height,
                     )
-                    corrected_indices.add(frame_index)
+                    correct_frame(frame_index, edited_mask)
+                    cumulative, included_count = build_cumulative(cursor)
                     print(f"{frame_name}：已使用人工修正 Mask")
                     continue
 
                 if key in (ord("r"), ord("R")):
-                    working_masks[frame_index] = motion_masks[
-                        frame_index
-                    ].copy()
-                    corrected_indices.discard(frame_index)
-                    mask_path = corrected_mask_path(frame_index)
+                    had_manual = frame_index in corrected_indices
+                    restore_frame(frame_index)
+                    cumulative, included_count = build_cumulative(cursor)
 
-                    if mask_path.exists():
-                        mask_path.unlink()
+                    if had_manual:
+                        print(f"{frame_name}：已恢复自动 Mask")
+                    else:
+                        print(
+                            f"{frame_name}：没有人工修正，"
+                            "保持自动 Mask"
+                        )
 
-                    print(f"{frame_name}：已恢复自动 Mask")
                     continue
 
                 if key in (27, ord("q"), ord("Q")):
