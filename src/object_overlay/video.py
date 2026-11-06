@@ -105,6 +105,59 @@ def find_ffmpeg() -> str:
         ) from exc
 
 
+def _extract_frames_with_opencv(
+    video_path: Path,
+    frames_dir: Path,
+    interval: float,
+) -> list[Path]:
+    """FFmpeg 无法写入时，用 OpenCV 顺序解码抽帧。
+
+    输出仍按 ``frame_0001.png`` 命名，时间点与 FFmpeg 的 fps 抽帧一致：
+    从 0 秒开始，每隔 interval 秒取一帧。VFR 视频按容器报告的平均帧率
+    近似处理。
+    """
+    capture = cv2.VideoCapture(str(video_path))
+
+    if not capture.isOpened():
+        raise RuntimeError(f"无法打开视频：{video_path}")
+
+    source_fps = float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
+
+    if source_fps <= 0:
+        source_fps = 30.0
+
+    step = source_fps * interval
+    next_sample = 0.0
+    source_index = 0
+    written = 0
+
+    try:
+        while True:
+            ok, frame = capture.read()
+
+            if not ok:
+                break
+
+            if source_index + 1e-9 >= next_sample:
+                path = frames_dir / f"frame_{written + 1:04d}.png"
+                write_image(
+                    path,
+                    frame,
+                    [cv2.IMWRITE_PNG_COMPRESSION, 0],
+                )
+                written += 1
+                next_sample = written * step
+
+            source_index += 1
+    finally:
+        capture.release()
+
+    if written == 0:
+        raise RuntimeError("OpenCV 未能从视频中抽取任何帧。")
+
+    return sorted(frames_dir.glob("frame_*.png"))
+
+
 def prepare_frames(
     video_path: Path,
     frames_dir: Path,
@@ -139,34 +192,49 @@ def prepare_frames(
         print(f"复用已有抽帧：{len(existing_frames)} 张")
         return existing_frames
 
-    ffmpeg_executable = find_ffmpeg()
     fps = 1.0 / interval
     print(f"开始抽帧：每 {interval:g} 秒一张 PNG")
 
-    command = [
-        ffmpeg_executable,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        str(video_path),
-        "-vf",
-        f"fps={fps:g}",
-        "-compression_level",
-        "0",
-        str(frames_dir / "frame_%04d.png"),
-    ]
-
     try:
-        subprocess.run(command, check=True)
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"FFmpeg 抽帧失败，返回码：{exc.returncode}") from exc
+        ffmpeg_executable = find_ffmpeg()
+        command = [
+            ffmpeg_executable,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"fps={fps:g}",
+            "-compression_level",
+            "0",
+            str(frames_dir / "frame_%04d.png"),
+        ]
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        frame_files = sorted(frames_dir.glob("frame_*.png"))
 
-    frame_files = sorted(frames_dir.glob("frame_*.png"))
+        if not frame_files:
+            raise RuntimeError("FFmpeg 已执行，但没有生成任何 PNG 帧。")
+    except Exception as exc:
+        print(
+            "FFmpeg 抽帧失败，改用 OpenCV 顺序解码"
+            f"（{type(exc).__name__}）。"
+        )
+        # FFmpeg 可能已写出部分帧；清掉后由 OpenCV 重新生成，避免重复编号。
+        for path in frames_dir.glob("frame_*.png"):
+            path.unlink()
 
-    if not frame_files:
-        raise RuntimeError("FFmpeg 已执行，但没有生成任何 PNG 帧。")
+        frame_files = _extract_frames_with_opencv(
+            video_path,
+            frames_dir,
+            interval,
+        )
 
     _write_metadata(metadata_file, video_path, interval)
     print(f"抽帧完成：{frames_dir}")

@@ -389,11 +389,17 @@ class Sam2Tracker:
                 "0",
                 str(self.track_dir / "%05d.jpg"),
             ]
-            subprocess.run(command, check=True)
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         except Exception as exc:
             print(
                 "FFmpeg 抽取 SAM 2.1 跟踪帧失败，"
-                f"改用 OpenCV 顺序解码：{exc}"
+                "改用 OpenCV 顺序解码"
+                f"（{type(exc).__name__}）。"
             )
             if self.track_dir.exists():
                 shutil.rmtree(self.track_dir)

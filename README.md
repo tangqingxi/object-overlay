@@ -257,7 +257,9 @@ uv sync
 
 ### FFmpeg 与中文路径
 
-程序优先使用系统 FFmpeg；没有时使用 `imageio-ffmpeg` 自带的版本。跟踪帧抽取和输出目录都支持 Windows 中文路径。
+程序优先使用系统 FFmpeg；没有时使用 `imageio-ffmpeg` 自带的版本。输出抽帧和 SAM 2.1 跟踪帧都支持 Windows 中文路径。
+
+如果 FFmpeg 报 `Could not open file` 或 `I/O error`，通常是 FFmpeg 进程无法写入输出目录。程序会自动改用 OpenCV 顺序解码重新抽帧；如果 OpenCV 也失败，请把 `--output-dir` 换到当前用户有写权限的目录。
 
 ## 测试
 
