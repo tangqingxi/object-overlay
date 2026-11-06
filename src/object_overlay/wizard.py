@@ -11,7 +11,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .menu import choose, prompt_text
+from .menu import (
+    _BOLD,
+    _CYAN,
+    _DIM,
+    _enable_ansi,
+    _paint,
+    choose,
+    prompt_text,
+)
 from .pipeline import (
     MODE_LABELS,
     TRACKER_LABELS,
@@ -399,7 +407,8 @@ def _summarize(config: RunConfig) -> None:
         trajectory = "不绘制"
 
     print()
-    print("将按以下设置生成：")
+    print(_paint("  将按以下设置生成", _BOLD, _CYAN))
+    print(_paint("  " + "-" * 40, _DIM))
     print(f"  输出内容    {MODE_LABELS.get(config.mode, config.mode)}")
     print(
         "  目标跟踪    "
@@ -438,8 +447,11 @@ def configure(config: RunConfig) -> RunConfig | None:
     current = config
     index = 0
 
+    _enable_ansi()
     print()
-    print(_KEYS_HINT)
+    print(_paint("  Object Overlay · SAM 2.1", _BOLD, _CYAN))
+    print(_paint("  " + "-" * 40, _DIM))
+    print(_paint("  " + _KEYS_HINT, _DIM))
 
     while True:
         # 每次作答后重新筛题：第一题选 overlay 之后，轨迹线那两题会消失；

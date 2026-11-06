@@ -14,6 +14,12 @@ from collections.abc import Callable, Sequence
 WINDOWS = sys.platform == "win32"
 
 _ESCAPE = "\x1b"
+_RESET = "\x1b[0m"
+_BOLD = "\x1b[1m"
+_DIM = "\x1b[2m"
+_CYAN = "\x1b[36m"
+_GREEN = "\x1b[32m"
+_WHITE = "\x1b[37m"
 # 单独的 Esc 与 "ESC [ A" 这类序列前缀相同，只能靠超时区分。
 _ESCAPE_TIMEOUT = 0.05
 _ENTER_KEYS = ("\r", "\n")
@@ -128,23 +134,40 @@ def read_key() -> str:
     return _read_key_posix()
 
 
+def _paint(text: str, *codes: str) -> str:
+    return "".join(codes) + text + _RESET
+
+
 def _render(
     title: str,
     options: Sequence[tuple[str, str]],
     index: int,
     label_width: int,
 ) -> list[str]:
-    lines = [f"? {title}"]
+    width = min(64, max(36, label_width + 20))
+    lines = [
+        "",
+        _paint(f"  {title}", _BOLD, _CYAN),
+        _paint("  " + "-" * width, _DIM),
+    ]
 
     for position, (label, note) in enumerate(options):
-        marker = ">" if position == index else " "
-        line = f"{marker} {label.ljust(label_width)}"
+        padded_label = label.ljust(label_width)
+
+        if position == index:
+            line = (
+                f"  {_paint('>', _BOLD, _GREEN)} "
+                f"{_paint(padded_label, _BOLD, _CYAN)}"
+            )
+        else:
+            line = f"    {padded_label}"
 
         if note:
-            line = f"{line}   {note}"
+            line = f"{line}   {_paint(note, _DIM, _WHITE)}"
 
         lines.append(line)
 
+    lines.append("")
     return lines
 
 
@@ -188,10 +211,11 @@ def choose(
 
 def prompt_text(title: str, default: str) -> str | None:
     """让用户输入一行文本；直接回车取默认值，Ctrl+C 返回 None。"""
-    print(f"? {title} [{default}]")
+    _enable_ansi()
+    print(_paint(f"  ? {title}", _BOLD, _CYAN) + f"  [{default}]")
 
     try:
-        answer = input("> ").strip()
+        answer = input(_paint("  > ", _GREEN)).strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None

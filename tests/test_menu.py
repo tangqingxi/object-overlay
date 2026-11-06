@@ -1,4 +1,5 @@
 import io
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -120,6 +121,17 @@ class ChooseTest(unittest.TestCase):
     def test_没有选项时返回None(self) -> None:
         with patch("sys.stdout", new_callable=io.StringIO):
             self.assertIsNone(menu.choose("标题", ()))
+
+    def test_菜单渲染包含标题分隔线和选中标记(self) -> None:
+        lines = menu._render("标题", self.OPTIONS, 1, 1)
+        text = "\n".join(
+            re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line)
+            for line in lines
+        )
+
+        self.assertIn("标题", text)
+        self.assertIn("----", text)
+        self.assertIn("> b", text)
 
 
 class WizardTest(unittest.TestCase):
