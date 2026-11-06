@@ -9,6 +9,8 @@
 
 `SAM` 分支保留原有的 OpenCV GUI、Mask 编辑器和图像合成模块，但目标 Mask 由 SAM 2.1 生成并通过视频时序传播。两个分支不自动合并；Light 用户继续使用 `main`。
 
+以下命令中的相对路径均以“包含仓库目录的父目录”为起点；如果你的仓库目录名或 worktree 路径不同，替换成自己的路径即可。
+
 ![无人机多时刻叠加效果](./photo.jpg)
 
 ## 两个版本
@@ -16,7 +18,7 @@
 ### Light 原版（`main`）
 
 ```powershell
-cd C:\Users\32450\Desktop\ulog\object-overlay   # main worktree
+cd .\object-overlay   # 进入 Light 工作目录
 uv sync
 uv run object-overlay "path\to\video.mp4" --select
 ```
@@ -26,7 +28,7 @@ Light 版不安装 PyTorch，也不加载 SAM 2.1；原有背景差分、GrabCut
 ### SAM 2.1 AI 版（本分支 `SAM`）
 
 ```powershell
-cd C:\Users\32450\Desktop\ulog\object-overlay-SAM   # SAM worktree
+cd .\object-overlay-SAM   # 进入 SAM 工作目录
 uv sync
 uv run object-overlay "path\to\video.mp4" --interval 0.3 --select --mode both
 ```
@@ -45,7 +47,7 @@ SAM 版默认使用 SAM 2.1 Small。首次运行会在背景帧上要求鼠标�
 推荐用 `git worktree` 给两个版本各建一个工作目录，避免共享 `.venv`：
 
 ```powershell
-cd C:\Users\32450\Desktop\ulog\object-overlay
+cd .\object-overlay
 git fetch origin
 git worktree add ..\object-overlay-SAM SAM
 cd ..\object-overlay-SAM
@@ -114,7 +116,7 @@ SAM 版默认 `--tracker sam2`。`--tracker motion` 仍保留为后备，但 AI 
   SAM 2.1 运行参数
     模型        sam2.1_hiera_small
     跟踪帧率    15 FPS
-    权重路径    C:\...\checkpoints\sam2.1_hiera_small.pt
+    权重路径    <repo-root>\checkpoints\sam2.1_hiera_small.pt
 ```
 
 这些值直接来自 `RunConfig` 和权重解析函数，不是菜单里另存的常量。默认值由源码中的 `DEFAULT_SAM2_MODEL`、`DEFAULT_SAM2_TRACK_FPS`、`DEFAULT_MODEL` / `resolve_checkpoint()` 决定；开发者要改默认值直接改这些源码即可。已有的 `--sam2-model`、`--sam2-track-fps`、`--sam2-checkpoint` 仍然兼容，并会反映在确认清单里。`--tracker motion` 时不显示这段 SAM 参数。
@@ -277,28 +279,9 @@ uv run python -m unittest tests.test_sam2_real -v
 - 背景帧只作为 ghost 的擦除对象；overlay 的背景像素始终不修改。
 - `--sam2-init-box` 只跳过鼠标框选，初始 Mask 预览仍需要窗口；完全无 GUI 的自动化可调用 `Sam2Tracker` 测试 API（见 `tests/test_sam2_real.py`）。
 
-## 实测记录
+## 性能与兼容性说明
 
-本次验证机为 **RTX 5060 Laptop GPU（8GB，`sm_120`）**，不是任务描述里的 RTX 5070；两者同属 Blackwell 架构，CUDA 12.8 构建均适用。环境：
-
-```text
-Windows 11 build 26200
-Python 3.12.13
-torch 2.11.0+cu128
-CUDA runtime 12.8
-GPU capability (12, 0)
-SAM 2.1 Small 权重 184,416,285 bytes
-```
-
-真实模型验证结果（非 Mock）：
-
-- 真实 CUDA 矩阵乘法成功执行，`torch.cuda.is_available()` 为 True，`get_device_capability()` 为 `(12, 0)`。
-- 640×480 合成 3 秒视频，48 个跟踪帧、6 个输出帧：模型加载 + 初始化 + 首次传播约 **15–16 秒**，峰值显存约 **0.73 GiB**。
-- 同一视频在第 3 个输出帧注入人工 Mask 后，后续输出帧 3、4、5 均被重新传播并改变，证明人工修正影响后续帧，而不是只改当前 PNG。
-- 1280×720 真实无人机 3 秒片段（`drone_1_3s.mp4`）：48 个跟踪帧，首次跟踪约 **16 秒**；在输出帧 3 修正后，后续帧 3–5 重传播约 **13 秒**；生成 `overlay.png` 与 `overlay_ghost.png`，`ghost` 中背景帧无人机被正确擦除并形成轨迹。
-- 第二次运行直接复用 `masks_sam2/` 缓存与人工锚点，不再加载模型（除非继续按 `M` 修正）。
-
-以上是本次机器上的实测值，不代表所有显卡/视频都能达到该速度。SAM 2.1 的官方 CUDA 后处理扩展未编译（`_C` 缺失），官方会打印 warning 并跳过可选后处理；本项目的跟踪与重传播结果不受影响。
+实际显存占用和跟踪速度取决于 GPU 型号、视频分辨率、目标运动速度和 `--sam2-track-fps`。本项目不承诺特定机型或实时性能；RTX 50 系列需要 CUDA 12.8 或更新的 PyTorch 构建（`sm_120`），详见上文的兼容性章节。
 
 ## 项目结构
 
