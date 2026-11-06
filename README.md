@@ -106,6 +106,19 @@ uv run object-overlay ".\examples\drone\input\drone_1.mp4" `
 
 SAM 版默认 `--tracker sam2`。`--tracker motion` 仍保留为后备，但 AI 版通常不需要。
 
+### 交互式菜单
+
+不加 `-y` 时仍会进入原有设置菜单，题目和顺序保持不变；不会新增 SAM 模型、跟踪帧率或权重路径的选择题。最后的“确认开始”清单会多出一段只读的 **SAM 2.1 运行参数**：
+
+```text
+  SAM 2.1 运行参数
+    模型        sam2.1_hiera_small
+    跟踪帧率    15 FPS
+    权重路径    C:\...\checkpoints\sam2.1_hiera_small.pt
+```
+
+这些值直接来自 `RunConfig` 和权重解析函数，不是菜单里另存的常量。默认值由源码中的 `DEFAULT_SAM2_MODEL`、`DEFAULT_SAM2_TRACK_FPS`、`DEFAULT_MODEL` / `resolve_checkpoint()` 决定；开发者要改默认值直接改这些源码即可。已有的 `--sam2-model`、`--sam2-track-fps`、`--sam2-checkpoint` 仍然兼容，并会反映在确认清单里。`--tracker motion` 时不显示这段 SAM 参数。
+
 ### 首次指定目标
 
 1. 程序先显示 `--base-frame` 指定的背景帧，例如默认 `frame_0001`。

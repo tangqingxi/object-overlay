@@ -173,6 +173,43 @@ class WizardTest(unittest.TestCase):
             ],
         )
 
+    def test_确认清单显示动态SAM2运行参数(self) -> None:
+        config = self._config(
+            sam2_model="sam2.1_hiera_tiny",
+            sam2_track_fps=7.5,
+            sam2_checkpoint=Path("D:/models/custom.pt"),
+        )
+
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            wizard._summarize(config)
+
+        text = output.getvalue()
+        self.assertIn("SAM 2.1 运行参数", text)
+        self.assertIn("sam2.1_hiera_tiny", text)
+        self.assertIn("7.5 FPS", text)
+        self.assertIn("custom.pt", text)
+
+    def test_确认清单默认SAM2参数来自配置(self) -> None:
+        config = self._config()
+
+        with (
+            patch.dict("os.environ", {"SAM2_CHECKPOINT": ""}, clear=False),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            wizard._summarize(config)
+
+        text = output.getvalue()
+        self.assertIn("sam2.1_hiera_small", text)
+        self.assertIn("15 FPS", text)
+        self.assertIn("checkpoints", text)
+        self.assertIn("sam2.1_hiera_small.pt", text)
+
+    def test_motion后端不显示SAM2运行参数(self) -> None:
+        with patch("sys.stdout", new_callable=io.StringIO) as output:
+            wizard._summarize(self._config(tracker="motion"))
+
+        self.assertNotIn("SAM 2.1 运行参数", output.getvalue())
+
     def test_选overlay后不再询问轨迹线(self) -> None:
         _, titles = self._run_with_answers(
             [0, 0, 0, 0, 0],

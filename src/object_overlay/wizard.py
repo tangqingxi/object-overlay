@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .menu import choose, prompt_text
 from .pipeline import RunConfig, default_output_dir
+from .sam2_tracker import resolve_checkpoint
 from .trajectory import format_hex_color, parse_hex_color
 
 
@@ -245,6 +246,24 @@ def _build_questions() -> tuple[Question, ...]:
     )
 
 
+def _print_sam2_summary(config: RunConfig) -> None:
+    """打印只读的 SAM 2.1 运行参数。
+
+    模型、帧率和权重都从 RunConfig / 权重解析函数读取，菜单不保存默认值；
+    开发者改 RunConfig 默认值或 --sam2-* 参数即可影响这里。
+    """
+    checkpoint = resolve_checkpoint(
+        config.sam2_checkpoint,
+        config.sam2_model,
+    )
+
+    print()
+    print("  SAM 2.1 运行参数")
+    print(f"    模型        {config.sam2_model}")
+    print(f"    跟踪帧率    {config.sam2_track_fps:g} FPS")
+    print(f"    权重路径    {checkpoint}")
+
+
 def _summarize(config: RunConfig) -> None:
     if config.show_trajectory:
         trajectory = (
@@ -267,6 +286,9 @@ def _summarize(config: RunConfig) -> None:
 
     print(f"  抽帧间隔    {config.interval:g} 秒")
     print(f"  逐帧复核    {'是' if config.select else '否'}")
+
+    if config.tracker == "sam2":
+        _print_sam2_summary(config)
 
 
 def configure(config: RunConfig) -> RunConfig | None:
